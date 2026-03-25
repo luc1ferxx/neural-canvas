@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+yarn.lock
+package-lock.json
+
+# Build outputs
+build/
+dist/
+/build
+/dist
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Misc
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Backend specific
+.gradle/
+.m2/
+target/
+*.jar
+*.class
+
+# Frontend specific (React)
+/coverage
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Sensitive files - AWS credentials and keys
+AWSCmd.txt
+*accessKeys.csv
+*.pem
+*.key
