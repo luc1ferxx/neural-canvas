@@ -20,12 +20,32 @@ type Config struct {
 	JWTSecret []byte
 	OpenAIKey string
 
+	// ImageProvider selects how /generate produces an image. See the constants
+	// below.
+	ImageProvider string
+
 	AllowedOrigins []string
 	Port           string
 
 	// LogLevel is the minimum severity that gets emitted. Defaults to info.
 	LogLevel slog.Level
 }
+
+// Image providers.
+//
+// A named switch rather than inferring from a missing key: "the key is absent so
+// presumably we did not mean to call OpenAI" is a guess, and getting it wrong in
+// the wrong direction means a deployment silently serving placeholder images
+// instead of failing loudly at startup.
+const (
+	// ProviderOpenAI calls DALL-E. Requires OPENAI_API_KEY.
+	ProviderOpenAI = "openai"
+	// ProviderStub renders a local placeholder and makes no network call. It
+	// exists so the whole stack can run with no cloud account and no billing --
+	// see docker-compose.yml -- and so the upload, storage and indexing path can
+	// be exercised end to end without paying per test run.
+	ProviderStub = "stub"
+)
 
 // C is the process-wide config, valid only after a successful Load.
 var C Config
@@ -51,8 +71,23 @@ func Load() error {
 	C.ESUsername = require("ES_USERNAME")
 	C.ESPassword = require("ES_PASSWORD")
 	C.GCSBucket = require("GCS_BUCKET")
-	C.OpenAIKey = require("OPENAI_API_KEY")
 	secret := require("JWT_SECRET")
+
+	// Read before the missing-variable check is reported, because whether
+	// OPENAI_API_KEY is required depends on it.
+	C.ImageProvider = strings.TrimSpace(os.Getenv("IMAGE_PROVIDER"))
+	if C.ImageProvider == "" {
+		C.ImageProvider = ProviderOpenAI
+	}
+	switch C.ImageProvider {
+	case ProviderOpenAI:
+		C.OpenAIKey = require("OPENAI_API_KEY")
+	case ProviderStub:
+		// No key needed: nothing leaves the process.
+	default:
+		return fmt.Errorf("IMAGE_PROVIDER %q is not one of %q, %q",
+			C.ImageProvider, ProviderOpenAI, ProviderStub)
+	}
 
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required environment variables: %s (see .env.example)",

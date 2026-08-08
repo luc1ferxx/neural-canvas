@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/luc1ferxx/neural-canvas/backend/config"
 	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/logging"
 	"github.com/luc1ferxx/neural-canvas/backend/media"
 	"github.com/luc1ferxx/neural-canvas/backend/model"
 
@@ -60,18 +62,13 @@ type openAIImageResponse struct {
 // through /api to dodge CORS: the download happens here, where CORS does not
 // apply.
 func GenerateAndSavePost(ctx context.Context, username, prompt string) (*model.Post, error) {
-	imageURL, err := generateImageURL(ctx, prompt)
+	imageBytes, err := renderImage(ctx, prompt)
 	if err != nil {
 		return nil, err
 	}
 
-	imageBytes, err := downloadImage(ctx, imageURL)
-	if err != nil {
-		return nil, err
-	}
-
-	// Validate what OpenAI returned against the same allowlist as user uploads,
-	// rather than trusting the source.
+	// Validate what the provider returned against the same allowlist as user
+	// uploads, rather than trusting the source.
 	postType, mime, body, err := media.Sniff(bytes.NewReader(imageBytes))
 	if err != nil {
 		return nil, fmt.Errorf("generated image failed validation: %w", err)
@@ -108,6 +105,29 @@ func GenerateAndSavePost(ctx context.Context, username, prompt string) (*model.P
 	}
 
 	return post, nil
+}
+
+// renderImage produces the image bytes for a prompt using the configured
+// provider.
+//
+// The switch is here rather than inside generateImageURL so that the stub path
+// makes no network call at all -- not a call to a fake endpoint, not a call that
+// is intercepted. Everything after this point is identical for both providers:
+// the same content sniffing, the same storage write, the same index write. That
+// is the property that makes the offline stack worth having, because the part
+// being skipped is exactly the part that costs money and nothing else.
+func renderImage(ctx context.Context, prompt string) ([]byte, error) {
+	if config.C.ImageProvider == config.ProviderStub {
+		logging.FromContext(ctx).Debug("rendering stub image; no OpenAI call",
+			slog.Int("prompt_len", len(prompt)))
+		return renderStubImage(prompt)
+	}
+
+	imageURL, err := generateImageURL(ctx, prompt)
+	if err != nil {
+		return nil, err
+	}
+	return downloadImage(ctx, imageURL)
 }
 
 func generateImageURL(ctx context.Context, prompt string) (string, error) {
