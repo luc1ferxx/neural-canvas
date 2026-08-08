@@ -9,8 +9,7 @@ import CreatePostButton from "./CreatePostButton";
 
 const { TabPane } = Tabs;
 
-// Matches the backend's default page size. The type tabs filter this set client
-// side, so the page has to be large enough to contain both kinds of post.
+// Matches the backend's default page size.
 const PAGE_SIZE = 50;
 
 function Collection(props) {
@@ -23,17 +22,18 @@ function Collection(props) {
 
   const handleSearch = (option) => setSearchOption(option);
 
+  // Refetch whenever the query or the tab changes: the type filter is applied by
+  // Elasticsearch now, so each tab is its own request. Previously one request
+  // was split between tabs in the browser, which meant a tab could report
+  // "No images!" while images existed further down the result set.
   useEffect(() => {
-    fetchPosts(searchOption);
-  }, [searchOption]);
+    let ignore = false;
 
-  const fetchPosts = (option) => {
-    const { type, keyword } = option;
-
-    // Ask for a full page explicitly. Without a size the backend fell back to
-    // Elasticsearch's default of 10 results, which made the type tabs below
-    // report "No images!" whenever the first 10 posts happened to be videos.
-    const params = new URLSearchParams({ size: String(PAGE_SIZE) });
+    const { type, keyword } = searchOption;
+    const params = new URLSearchParams({
+      size: String(PAGE_SIZE),
+      type: activeTab,
+    });
 
     if (type === SEARCH_KEY.user) {
       // URLSearchParams encodes the value, so keywords containing & or # no
@@ -46,56 +46,60 @@ function Collection(props) {
     api
       .get(`/search?${params.toString()}`)
       .then((res) => {
+        // Drop the response if the tab or query changed while it was in flight,
+        // so a slow earlier request cannot overwrite a newer one.
+        if (ignore) {
+          return;
+        }
         if (res.status === 200) {
           setPosts(res.data);
         }
       })
       .catch((err) => {
+        if (ignore) {
+          return;
+        }
         message.error("Fetch posts failed!");
         console.log("fetch posts failed: ", err.message);
       });
+
+    return () => {
+      ignore = true;
+    };
+  }, [searchOption, activeTab]);
+
+  const renderImages = () => {
+    if (!posts || posts.length === 0) {
+      return <div>No images!</div>;
+    }
+
+    const imageArr = posts.map((image) => ({
+      postId: image.id,
+      src: image.url,
+      user: image.user,
+      caption: image.message,
+      thumbnail: image.url,
+      thumbnailWidth: 300,
+      thumbnailHeight: 200,
+    }));
+
+    return <PhotoGallery images={imageArr} />;
   };
 
-  const renderPosts = (type) => {
+  const renderVideos = () => {
     if (!posts || posts.length === 0) {
-      return <div>No data!</div>;
+      return <div>No videos!</div>;
     }
 
-    let filtered;
-
-    if (type === "image") {
-      filtered = posts.filter((post) => post.type === "image");
-      if (!filtered || filtered.length === 0) {
-        return <div>No images!</div>;
-      }
-      const imageArr = filtered.map((image) => {
-        return {
-          postId: image.id,
-          src: image.url,
-          user: image.user,
-          caption: image.message,
-          thumbnail: image.url,
-          thumbnailWidth: 300,
-          thumbnailHeight: 200,
-        };
-      });
-
-      return <PhotoGallery images={imageArr} />;
-    } else if (type === "video") {
-      filtered = posts.filter((post) => post.type === "video");
-      if (!filtered || filtered.length === 0) {
-        return <div>No videos!</div>;
-      }
-      return (
-        <Row>
-          {filtered.map((post) => (
-            <Col span={24} key={post.url}>
-              <video src={post.url} controls={true} className="video-block" />
-            </Col>
-          ))}
-        </Row>
-      );
-    }
+    return (
+      <Row>
+        {posts.map((post) => (
+          <Col span={24} key={post.id}>
+            <video src={post.url} controls={true} className="video-block" />
+          </Col>
+        ))}
+      </Row>
+    );
   };
 
   const showPost = (type) => {
@@ -119,10 +123,10 @@ function Collection(props) {
           tabBarExtraContent={operations}
         >
           <TabPane tab="Images" key="image">
-            {renderPosts("image")}
+            {activeTab === "image" && renderImages()}
           </TabPane>
           <TabPane tab="Videos" key="video">
-            {renderPosts("video")}
+            {activeTab === "video" && renderVideos()}
           </TabPane>
         </Tabs>
       </div>
@@ -131,4 +135,3 @@ function Collection(props) {
 }
 
 export default Collection;
-

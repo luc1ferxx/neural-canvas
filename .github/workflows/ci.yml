@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref rather than paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: socialai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Matches the go directive in socialai/go.mod.
+          go-version-file: socialai/go.mod
+          cache-dependency-path: socialai/go.sum
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod download
+          go mod verify
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d .
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  integration:
+    name: Integration (Go + Elasticsearch)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: socialai
+
+    # These tests cover what compiling cannot: that the mappings are accepted,
+    # that the Painless throttle script increments rather than overwrites, that
+    # an "index": false field really cannot be filtered on, and that the reindex
+    # preserves fields. They skip automatically when ES_TEST_URL is unset.
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.17.24
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -f http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: socialai/go.mod
+          cache-dependency-path: socialai/go.sum
+
+      - name: Wait for Elasticsearch
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9200 >/dev/null; then
+              echo "Elasticsearch is up."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Elasticsearch did not become ready"
+          exit 1
+
+      - name: Integration tests
+        run: go test -count=1 -run Integration -v ./...
+        env:
+          ES_TEST_URL: http://localhost:9200
+
+  frontend:
+    name: Frontend (React)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: social-ai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: social-ai/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test -- --watchAll=false
+        env:
+          CI: true
+
+      - name: Build
+        run: npm run build
+        env:
+          CI: true
+
+      # A guard against the regression this project already shipped once: the
+      # OpenAI key was read from process.env in the browser, so Create React App
+      # inlined it into the bundle for every visitor to read.
+      - name: Assert no OpenAI key path in the bundle
+        run: |
+          if grep -rlE "REACT_APP_OPENAI|api\.openai\.com|dangerouslyAllowBrowser" build/static/js/; then
+            echo "::error::The production bundle references an OpenAI key path. Image generation must stay server-side."
+            exit 1
+          fi
+          echo "Bundle is clean."

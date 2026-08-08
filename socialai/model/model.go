@@ -13,4 +13,9 @@ type User struct {
 	Password string `json:"password"`
 	Age      int64  `json:"age"`
 	Gender   string `json:"gender"`
+
+	// TokensValidAfter is a unix timestamp. Any token issued before it is
+	// refused, which is how signing out revokes a session that would otherwise
+	// stay valid for its full 24 hours. Zero means nothing has been revoked.
+	TokensValidAfter int64 `json:"tokensValidAfter"`
 }

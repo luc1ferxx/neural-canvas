@@ -3,7 +3,12 @@ import ResponsiveAppBar from "./ResponsiveAppBar";
 import Main from "./Main";
 
 import { TOKEN_KEY } from "../constants";
-import { AUTH_LOGOUT_EVENT, clearToken, getToken, isTokenValid } from "../api";
+import api, {
+  AUTH_LOGOUT_EVENT,
+  clearToken,
+  getToken,
+  isTokenValid,
+} from "../api";
 
 function App() {
   // Presence of a token is not enough: an expired one used to render the whole
@@ -11,8 +16,19 @@ function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(() => isTokenValid(getToken()));
 
   const logout = () => {
-    clearToken();
-    setIsLoggedIn(false);
+    // Tell the server first so the token is revoked, not just forgotten: a JWT
+    // stays valid for its full lifetime otherwise, so a copy taken from storage
+    // would keep working after "logging out".
+    //
+    // The local state is cleared either way. If the request fails the user is
+    // still signed out here, which is the behaviour they asked for.
+    api
+      .post("/signout")
+      .catch((err) => console.log("signout failed: ", err.message))
+      .finally(() => {
+        clearToken();
+        setIsLoggedIn(false);
+      });
   };
 
   const loggedIn = (token) => {

@@ -33,6 +33,10 @@ var allowed = map[string]string{
 	"video/mp4":  "video",
 	"video/webm": "video",
 	"video/avi":  "video",
+	// Detected by containers.go rather than net/http.
+	"video/quicktime": "video",
+	"video/x-flv":     "video",
+	"video/x-ms-wmv":  "video",
 }
 
 // ErrUnsupported reports a payload whose real content type is not allowed. The
@@ -69,6 +73,16 @@ func Sniff(r io.Reader) (postType, mime string, body io.Reader, err error) {
 	// DetectContentType may append parameters, e.g. "text/plain; charset=utf-8".
 	if i := strings.IndexByte(mime, ';'); i >= 0 {
 		mime = strings.TrimSpace(mime[:i])
+	}
+
+	// Go's sniff table has no entry for QuickTime, FLV or ASF/WMV, so those
+	// arrive here as application/octet-stream. Consult the extra container
+	// signatures before rejecting. This runs second so Go's own detection always
+	// wins where it has an opinion.
+	if _, known := allowed[mime]; !known {
+		if extra := detectExtra(header); extra != "" {
+			mime = extra
+		}
 	}
 
 	postType, ok := allowed[mime]

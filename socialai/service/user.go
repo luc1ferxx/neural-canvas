@@ -2,38 +2,54 @@ package service
 
 import (
 	"fmt"
-	"reflect"
+	"time"
 
 	"socialai/backend"
 	"socialai/constants"
 	"socialai/model"
 
-	"github.com/olivere/elastic/v7"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // ErrUserExists reports a taken username.
 var ErrUserExists = fmt.Errorf("user already exists")
 
+// dummyHash is a valid bcrypt hash of a value nobody can supply, used purely to
+// equalize timing on the user-not-found path.
+var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
+
+// getUser fetches a user by username.
+//
+// Users are indexed under their username, so this is a get by id rather than a
+// search. Get is realtime in Elasticsearch, which means a freshly registered
+// account can log in immediately instead of waiting for the next refresh.
+func getUser(username string) (*model.User, bool, error) {
+	var user model.User
+	found, err := backend.ESBackend.GetDocument(constants.USER_INDEX, username, &user)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return nil, false, nil
+	}
+	return &user, true, nil
+}
+
 // CheckUser looks the user up by username and compares the supplied password
 // against the stored bcrypt hash.
 //
-// The password is never part of the query. The previous implementation searched
+// The password is never part of the query. The original implementation searched
 // Elasticsearch for username AND password as a term query, which only works if
 // the password is stored in plaintext.
 //
 // Returns (false, nil) for both "no such user" and "wrong password" so the
 // caller cannot distinguish them and leak which usernames exist.
 func CheckUser(username, password string) (bool, error) {
-	query := elastic.NewTermQuery("username", username)
-
-	searchResult, err := backend.ESBackend.ReadFromES(query, constants.USER_INDEX)
+	user, found, err := getUser(username)
 	if err != nil {
 		return false, err
 	}
-
-	users := getUserFromSearchResult(searchResult)
-	if len(users) == 0 {
+	if !found {
 		// Hash a throwaway value so a missing user costs roughly the same time
 		// as a wrong password; otherwise response latency reveals which
 		// usernames are registered.
@@ -41,8 +57,7 @@ func CheckUser(username, password string) (bool, error) {
 		return false, nil
 	}
 
-	stored := users[0].Password
-	if err := bcrypt.CompareHashAndPassword([]byte(stored), []byte(password)); err != nil {
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password)); err != nil {
 		if err == bcrypt.ErrMismatchedHashAndPassword {
 			return false, nil
 		}
@@ -54,19 +69,14 @@ func CheckUser(username, password string) (bool, error) {
 	return true, nil
 }
 
-// dummyHash is a valid bcrypt hash of a value nobody can supply, used purely to
-// equalize timing on the user-not-found path.
-var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
-
 // AddUser hashes the password and stores the user. Returns ErrUserExists if the
 // username is taken.
 func AddUser(user *model.User) error {
-	query := elastic.NewTermQuery("username", user.Username)
-	searchResult, err := backend.ESBackend.ReadFromES(query, constants.USER_INDEX)
+	_, found, err := getUser(user.Username)
 	if err != nil {
 		return err
 	}
-	if searchResult.TotalHits() > 0 {
+	if found {
 		return ErrUserExists
 	}
 
@@ -88,14 +98,38 @@ func AddUser(user *model.User) error {
 	return nil
 }
 
-func getUserFromSearchResult(searchResult *elastic.SearchResult) []model.User {
-	var utype model.User
-	var users []model.User
-
-	for _, item := range searchResult.Each(reflect.TypeOf(utype)) {
-		if u, ok := item.(model.User); ok {
-			users = append(users, u)
-		}
+// TokensValidAfter returns the unix timestamp before which this user's tokens
+// are no longer accepted. Zero means nothing has been revoked.
+func TokensValidAfter(username string) (int64, error) {
+	user, found, err := getUser(username)
+	if err != nil {
+		return 0, err
 	}
-	return users
+	if !found {
+		// The account is gone; treat every token for it as revoked.
+		return time.Now().Unix() + 1, nil
+	}
+	return user.TokensValidAfter, nil
+}
+
+// RevokeTokens invalidates every token issued to this user up to now.
+//
+// This is what makes signing out mean something on the server. Clearing the
+// token in the browser alone left it valid for the remainder of its 24 hours, so
+// a copy taken from storage kept working.
+func RevokeTokens(username string) error {
+	_, found, err := getUser(username)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+
+	// Tokens carry a whole-second iat. Using now+1 ensures a token minted during
+	// this same second is also refused, rather than surviving on a tie.
+	cutoff := time.Now().Unix() + 1
+
+	return backend.ESBackend.UpdateFields(constants.USER_INDEX, username,
+		map[string]interface{}{"tokensValidAfter": cutoff})
 }

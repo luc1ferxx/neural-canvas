@@ -69,20 +69,28 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// validPostTypes bounds the type filter. An unrecognised value is ignored
+// rather than rejected, so a stale client cannot break search.
+var validPostTypes = map[string]bool{"image": true, "video": true}
+
 func searchHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Received one request for search")
 
-	user := r.URL.Query().Get("user")
-	keywords := r.URL.Query().Get("keywords")
-	from, size := parsePagination(r.URL.Query())
+	q := r.URL.Query()
+	from, size := parsePagination(q)
 
-	var posts []model.Post
-	var err error
-	if user != "" {
-		posts, err = service.SearchPostsByUser(user, from, size)
-	} else {
-		posts, err = service.SearchPostsByKeywords(keywords, from, size)
+	postType := q.Get("type")
+	if !validPostTypes[postType] {
+		postType = ""
 	}
+
+	posts, err := service.SearchPosts(service.PostQuery{
+		User:     q.Get("user"),
+		Keywords: q.Get("keywords"),
+		Type:     postType,
+		From:     from,
+		Size:     size,
+	})
 	if err != nil {
 		http.Error(w, "Failed to read post from backend", http.StatusInternalServerError)
 		fmt.Printf("Failed to read post from backend %v.\n", err)

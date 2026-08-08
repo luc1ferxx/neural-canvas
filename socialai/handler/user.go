@@ -31,8 +31,6 @@ const (
 	maxAuthBodyBytes = 4 << 10
 )
 
-var throttle = newLoginThrottle()
-
 func signinHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Received one signin request")
 
@@ -41,7 +39,14 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !throttle.allow(user.Username) {
+	// The throttle is backed by Elasticsearch, so the limit is shared across
+	// instances. If that lookup fails, Elasticsearch is unreachable and the
+	// credential check below would fail anyway -- so this logs and continues
+	// rather than locking everyone out on a transient error.
+	allowed, err := service.LoginAllowed(user.Username)
+	if err != nil {
+		fmt.Printf("Could not read login throttle for %q: %v\n", user.Username, err)
+	} else if !allowed {
 		http.Error(w, "Too many failed sign-in attempts, try again later", http.StatusTooManyRequests)
 		fmt.Printf("Throttled sign-in for %q\n", user.Username)
 		return
@@ -55,12 +60,16 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !success {
-		throttle.recordFailure(user.Username)
+		if err := service.RecordLoginFailure(user.Username); err != nil {
+			fmt.Printf("Could not record login failure for %q: %v\n", user.Username, err)
+		}
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
 
-	throttle.recordSuccess(user.Username)
+	if err := service.ClearLoginFailures(user.Username); err != nil {
+		fmt.Printf("Could not clear login failures for %q: %v\n", user.Username, err)
+	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"username": user.Username,

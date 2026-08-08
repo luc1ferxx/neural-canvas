@@ -1,7 +1,10 @@
 # Dependencies
 node_modules/
-yarn.lock
-package-lock.json
+
+# Lockfiles are deliberately NOT ignored. Committing package-lock.json is what
+# makes an install reproducible and lets CI use `npm ci`. Ignoring it also hid a
+# real problem: @ant-design/icons and prop-types were imported without being
+# declared, and resolved only by accident through another package's tree.
 
 # Build outputs
 build/

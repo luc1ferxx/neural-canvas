@@ -18,30 +18,55 @@ import (
 // user's post id exists.
 var ErrPostNotFound = fmt.Errorf("post not found")
 
-func SearchPostsByUser(user string, from, size int) ([]model.Post, error) {
-	// 1. create a query
-	query := elastic.NewTermQuery("user", user)
+// PostQuery describes a post search. It replaces a pair of functions whose
+// parameter lists were growing with every filter.
+type PostQuery struct {
+	// User restricts results to one author. When set, Keywords is ignored,
+	// preserving the original behaviour.
+	User string
+	// Keywords matches against the post message.
+	Keywords string
+	// Type filters by "image" or "video". Empty means both.
+	Type string
 
-	// 2. call backend
-	searchResult, err := backend.ESBackend.ReadFromESPaged(query, constants.POST_INDEX, from, size)
-	if err != nil {
-		return nil, err
-	}
-
-	return getPostFromSearchResult(searchResult), nil
+	From int
+	Size int
 }
 
-func SearchPostsByKeywords(keywords string, from, size int) ([]model.Post, error) {
-	// 1. create a query
-	query := elastic.NewMatchQuery("message", keywords)
-	query.Operator("AND")
-	// An empty keyword lists everything rather than nothing.
-	if keywords == "" {
-		query.ZeroTermsQuery("all")
+// buildPostQuery translates a PostQuery into an Elasticsearch query. Split out
+// from SearchPosts so the filter logic can be asserted on without a cluster.
+func buildPostQuery(q PostQuery) elastic.Query {
+	query := elastic.NewBoolQuery()
+
+	if q.User != "" {
+		query.Must(elastic.NewTermQuery("user", q.User))
+	} else {
+		match := elastic.NewMatchQuery("message", q.Keywords)
+		match.Operator("AND")
+		// An empty keyword lists everything rather than nothing.
+		if q.Keywords == "" {
+			match.ZeroTermsQuery("all")
+		}
+		query.Must(match)
 	}
 
-	// 2. call backend
-	searchResult, err := backend.ESBackend.ReadFromESPaged(query, constants.POST_INDEX, from, size)
+	if q.Type != "" {
+		// Filter rather than must: this is a yes/no restriction that should not
+		// influence relevance scoring.
+		query.Filter(elastic.NewTermQuery("type", q.Type))
+	}
+
+	return query
+}
+
+// SearchPosts runs a post search.
+//
+// Filtering by type happens here rather than in the browser. The frontend used
+// to fetch one page and split it into tabs client side, so a tab could report
+// "No images!" while images existed further down the result set.
+func SearchPosts(q PostQuery) ([]model.Post, error) {
+	searchResult, err := backend.ESBackend.ReadFromESPaged(
+		buildPostQuery(q), constants.POST_INDEX, q.From, q.Size)
 	if err != nil {
 		return nil, err
 	}

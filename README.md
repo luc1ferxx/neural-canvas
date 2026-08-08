@@ -61,8 +61,19 @@ go run .
 ```bash
 go build ./...            # compile
 go vet ./...              # static checks
-go test ./...             # tests
+go test ./...             # unit tests
 ```
+
+Integration tests run against a real Elasticsearch and skip unless `ES_TEST_URL`
+is set. They cover what compiling cannot: that the mappings are accepted, that
+the throttle script increments rather than overwrites, that an unindexed field
+genuinely cannot be filtered on, and that the reindex preserves fields.
+
+```bash
+ES_TEST_URL=http://127.0.0.1:9200 go test -run Integration -v ./...
+```
+
+CI runs them with an Elasticsearch service container.
 
 ### Endpoints
 
@@ -70,15 +81,17 @@ go test ./...             # tests
 |---|---|---|---|
 | `POST` | `/signup` | — | Create an account |
 | `POST` | `/signin` | — | Exchange credentials for a 24h JWT |
+| `POST` | `/signout` | JWT | Revoke every token issued to the caller so far |
 | `POST` | `/generate` | JWT | Generate an image from a prompt, store it, return the post |
 | `POST` | `/upload` | JWT | Upload media and create a post |
-| `GET` | `/search` | JWT | Search posts by `user` or `keywords` |
+| `GET` | `/search` | JWT | Search posts by `user` or `keywords`, filter by `type` |
 | `DELETE` | `/post/{id}` | JWT | Delete one of your own posts and its stored media |
 
 `GET /search` accepts `from` and `size` for paging, defaulting to `from=0` and
 `size=50` with a ceiling of 200. Invalid values are clamped rather than
-rejected. Leaving `size` unset previously fell through to Elasticsearch's
-default of 10, which silently truncated every result set.
+rejected. It also accepts `type=image` or `type=video`; an unrecognised value is
+ignored. Filtering happens in Elasticsearch, so each gallery tab is its own
+request rather than a client-side slice of one page.
 
 `DELETE /post/{id}` only removes a post whose `user` matches the caller, and
 returns 404 when nothing matches — a missing post and someone else's post are
@@ -89,23 +102,57 @@ objects are world-readable and a leftover file would stay fetchable by URL.
 ### Authentication
 
 Passwords are stored as bcrypt hashes; the plaintext is never persisted and
-never part of a query. Sign-in looks the user up by username and compares the
-hash in application code.
+never part of a query. Sign-in looks the user up by document id, which is
+realtime in Elasticsearch, so a freshly registered account can log in
+immediately.
 
-Failed sign-ins are throttled per username (5 attempts per 15 minutes). The
-counter is in process memory, so with more than one instance the effective limit
-is per-instance — move it to a shared store if the instance count grows.
+Signing out is enforced server-side. A JWT is self-contained, so clearing it in
+the browser alone left it valid for the remainder of its 24 hours. `POST
+/signout` records a `tokensValidAfter` timestamp on the user, and any token
+issued before it is refused on the next request. The state lives in
+Elasticsearch, so a sign-out applies across instances.
+
+Failed sign-ins are throttled per username: 5 attempts per 15 minutes. Counters
+live in Elasticsearch and are incremented by a Painless script, so the increment
+is atomic and the limit is shared rather than per-instance.
 
 ### Media handling
 
 Uploads are capped at 32 MiB and typed by inspecting their leading bytes, not by
-filename extension. Only JPEG, PNG, GIF, WebP, MP4, WebM and AVI are accepted.
+filename extension. Accepted: JPEG, PNG, GIF, WebP, MP4, WebM, AVI, QuickTime,
+FLV and WMV. The last three are detected from explicit container signatures,
+since Go's `http.DetectContentType` has no entry for them.
 
 Objects in the bucket are world-readable, so script-capable formats are refused
 outright: an accepted `.svg` or `.html` would be stored XSS served from the
-app's own storage domain. Note this is stricter than before — QuickTime `.mov`,
-`.flv` and `.wmv` are no longer accepted, because Go's content sniffer cannot
-positively identify them.
+app's own storage domain.
+
+### Migrating an existing deployment
+
+The post index is versioned. The original mapping declared `type` with
+`"index": false`, which makes the field unsearchable — Elasticsearch rejects a
+filter on it with a 400 rather than returning nothing — and that parameter
+cannot be changed on an existing field. So filtering by type server-side
+required a new index.
+
+After deploying, copy the old documents across:
+
+```bash
+cd socialai
+set -a && . ./.env && set +a
+go run ./cmd/reindex
+```
+
+The values survive the copy because an unindexed field is still stored in
+`_source`. The command refuses to write into a non-empty destination unless
+given `-force`, and the server prints a prominent warning at startup while the
+migration is outstanding, so an empty gallery is not mistaken for data loss.
+
+Delete the legacy index once you are satisfied:
+
+```bash
+curl -XDELETE "$ES_URL/post" -u "$ES_USERNAME:$ES_PASSWORD"
+```
 
 ## Frontend (social-ai)
 
@@ -141,23 +188,16 @@ stores the result, and returns the saved post. The frontend holds no API key.
 
 ## Known gaps
 
-Tracked but not yet addressed:
-
-- Type tabs filter client side within one page. The `type` field is mapped
-  `"index": false`, so Elasticsearch cannot filter on it; making the tabs
-  server-side paged requires indexing that field and reindexing existing posts.
-  With the default page size of 50 this is no longer visible in practice, but it
-  is not correct for large collections.
-- Logout and the 401 handler both clear the token client side. The JWT itself
-  stays valid for the remainder of its 24 hours, because there is no server-side
-  revocation list.
-- The sign-in throttle counts attempts in process memory, so with more than one
-  instance the effective limit is per-instance.
-- QuickTime `.mov`, `.flv` and `.wmv` uploads are rejected: Go's content sniffer
-  cannot positively identify them, and the filename extension is not trusted.
-  Supporting them needs explicit ftyp brand parsing.
-- No CI. `go build ./...`, `go vet ./...`, `go test ./...`, `npm ci` and
-  `npm test` all pass locally and would make a reasonable first workflow.
+- A revoked session is enforced with one Elasticsearch get per authenticated
+  request. That is a sub-millisecond lookup at this scale; a short-lived cache
+  would trade immediate revocation for throughput if it ever stops being cheap.
+- `/signout` revokes every token for that user, not just the one presented.
+  Signing out of one browser signs out of all of them.
+- Search paging is offset-based (`from`/`size`), which degrades past roughly
+  10,000 results. A `search_after` cursor would be needed beyond that.
+- The GCS write, the DALL-E call and the delete of a stored object have never run
+  against live services here: they need real credentials. Everything else is
+  covered by the unit and integration suites.
 
 ## License
 
