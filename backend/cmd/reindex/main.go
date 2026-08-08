@@ -17,9 +17,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/luc1ferxx/neural-canvas/backend/config"
 	"github.com/luc1ferxx/neural-canvas/backend/constants"
@@ -34,7 +38,14 @@ func main() {
 	if err := config.Load(); err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
-	if err := store.InitElasticsearchBackend(); err != nil {
+
+	// Ctrl-C aborts the copy. Elasticsearch stops the underlying reindex task when
+	// the connection goes away, so a cancelled run leaves the destination partially
+	// filled rather than corrupt -- and a re-run copies by id, so it converges.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	if err := store.InitElasticsearchBackend(ctx); err != nil {
 		log.Fatalf("elasticsearch: %v", err)
 	}
 
@@ -42,7 +53,7 @@ func main() {
 	src := constants.POST_INDEX_LEGACY
 	dst := constants.POST_INDEX
 
-	srcExists, err := es.IndexExists(src)
+	srcExists, err := es.IndexExists(ctx, src)
 	if err != nil {
 		log.Fatalf("check %q: %v", src, err)
 	}
@@ -51,13 +62,13 @@ func main() {
 		return
 	}
 
-	srcCount, err := es.CountDocuments(src)
+	srcCount, err := es.CountDocuments(ctx, src)
 	if err != nil {
 		log.Fatalf("count %q: %v", src, err)
 	}
 
 	// InitElasticsearchBackend already created dst with the current mapping.
-	dstCount, err := es.CountDocuments(dst)
+	dstCount, err := es.CountDocuments(ctx, dst)
 	if err != nil {
 		log.Fatalf("count %q: %v", dst, err)
 	}
@@ -77,12 +88,17 @@ func main() {
 	}
 
 	fmt.Printf("\nCopying %s -> %s ...\n", src, dst)
-	copied, err := es.Reindex(src, dst)
+	// Reindex sets no deadline of its own, because only the caller knows how much
+	// data there is. An hour is generous for this dataset and still bounded.
+	reindexCtx, cancel := context.WithTimeout(ctx, time.Hour)
+	defer cancel()
+
+	copied, err := es.Reindex(reindexCtx, src, dst)
 	if err != nil {
 		log.Fatalf("reindex: %v", err)
 	}
 
-	finalCount, err := es.CountDocuments(dst)
+	finalCount, err := es.CountDocuments(ctx, dst)
 	if err != nil {
 		log.Fatalf("count %q after copy: %v", dst, err)
 	}

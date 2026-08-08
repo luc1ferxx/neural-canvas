@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -24,9 +25,9 @@ var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17
 // Users are indexed under their username, so this is a get by id rather than a
 // search. Get is realtime in Elasticsearch, which means a freshly registered
 // account can log in immediately instead of waiting for the next refresh.
-func getUser(username string) (*model.User, bool, error) {
+func getUser(ctx context.Context, username string) (*model.User, bool, error) {
 	var user model.User
-	found, err := store.ESBackend.GetDocument(constants.USER_INDEX, username, &user)
+	found, err := store.ESBackend.GetDocument(ctx, constants.USER_INDEX, username, &user)
 	if err != nil {
 		return nil, false, err
 	}
@@ -45,8 +46,8 @@ func getUser(username string) (*model.User, bool, error) {
 //
 // Returns (false, nil) for both "no such user" and "wrong password" so the
 // caller cannot distinguish them and leak which usernames exist.
-func CheckUser(username, password string) (bool, error) {
-	user, found, err := getUser(username)
+func CheckUser(ctx context.Context, username, password string) (bool, error) {
+	user, found, err := getUser(ctx, username)
 	if err != nil {
 		return false, err
 	}
@@ -72,8 +73,8 @@ func CheckUser(username, password string) (bool, error) {
 
 // AddUser hashes the password and stores the user. Returns ErrUserExists if the
 // username is taken.
-func AddUser(user *model.User) error {
-	_, found, err := getUser(user.Username)
+func AddUser(ctx context.Context, user *model.User) error {
+	_, found, err := getUser(ctx, user.Username)
 	if err != nil {
 		return err
 	}
@@ -91,7 +92,7 @@ func AddUser(user *model.User) error {
 	toStore := *user
 	toStore.Password = string(hashed)
 
-	if err := store.ESBackend.SaveToES(&toStore, constants.USER_INDEX, toStore.Username); err != nil {
+	if err := store.ESBackend.SaveToES(ctx, &toStore, constants.USER_INDEX, toStore.Username); err != nil {
 		return err
 	}
 
@@ -101,8 +102,8 @@ func AddUser(user *model.User) error {
 
 // TokensValidAfter returns the unix timestamp before which this user's tokens
 // are no longer accepted. Zero means nothing has been revoked.
-func TokensValidAfter(username string) (int64, error) {
-	user, found, err := getUser(username)
+func TokensValidAfter(ctx context.Context, username string) (int64, error) {
+	user, found, err := getUser(ctx, username)
 	if err != nil {
 		return 0, err
 	}
@@ -118,8 +119,8 @@ func TokensValidAfter(username string) (int64, error) {
 // This is what makes signing out mean something on the server. Clearing the
 // token in the browser alone left it valid for the remainder of its 24 hours, so
 // a copy taken from storage kept working.
-func RevokeTokens(username string) error {
-	_, found, err := getUser(username)
+func RevokeTokens(ctx context.Context, username string) error {
+	_, found, err := getUser(ctx, username)
 	if err != nil {
 		return err
 	}
@@ -131,6 +132,6 @@ func RevokeTokens(username string) error {
 	// this same second is also refused, rather than surviving on a tie.
 	cutoff := time.Now().Unix() + 1
 
-	return store.ESBackend.UpdateFields(constants.USER_INDEX, username,
+	return store.ESBackend.UpdateFields(ctx, constants.USER_INDEX, username,
 		map[string]interface{}{"tokensValidAfter": cutoff})
 }

@@ -66,9 +66,9 @@ const loginAttemptMapping = `{
     }
 }`
 
-// InitElasticsearchBackend connects and ensures both indexes exist. It returns
+// InitElasticsearchBackend connects and ensures every index exists. It returns
 // an error rather than panicking so main can report a usable message and exit.
-func InitElasticsearchBackend() error {
+func InitElasticsearchBackend(ctx context.Context) error {
 	client, err := elastic.NewClient(
 		elastic.SetURL(config.C.ESURL),
 		elastic.SetBasicAuth(config.C.ESUsername, config.C.ESPassword),
@@ -81,20 +81,35 @@ func InitElasticsearchBackend() error {
 		return fmt.Errorf("connect to elasticsearch at %s: %w", config.C.ESURL, err)
 	}
 
-	if err := ensureIndex(client, constants.POST_INDEX, postMapping); err != nil {
-		return err
-	}
-	if err := ensureIndex(client, constants.USER_INDEX, userMapping); err != nil {
-		return err
-	}
-	if err := ensureIndex(client, constants.LOGIN_ATTEMPT_INDEX, loginAttemptMapping); err != nil {
-		return err
+	for _, idx := range []struct {
+		name    string
+		mapping string
+	}{
+		{constants.POST_INDEX, postMapping},
+		{constants.USER_INDEX, userMapping},
+		{constants.LOGIN_ATTEMPT_INDEX, loginAttemptMapping},
+	} {
+		if err := ensureIndex(ctx, client, idx.name, idx.mapping); err != nil {
+			return err
+		}
 	}
 
 	ESBackend = &ElasticsearchBackend{client: client}
 
-	warnIfMigrationPending(ESBackend)
+	warnIfMigrationPending(ctx, ESBackend)
 
+	return nil
+}
+
+// Ping reports whether the cluster answers. The readiness probe needs this to
+// distinguish "this process is alive" from "this process can serve traffic".
+func (backend *ElasticsearchBackend) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
+	defer cancel()
+
+	if _, _, err := backend.client.Ping(config.C.ESURL).Do(ctx); err != nil {
+		return fmt.Errorf("ping elasticsearch: %w", err)
+	}
 	return nil
 }
 
@@ -105,18 +120,18 @@ func InitElasticsearchBackend() error {
 // symptom is alarming and easy to misread: every post appears to have vanished.
 // The data is intact in the old index, so say so loudly rather than letting an
 // operator discover it through an empty gallery.
-func warnIfMigrationPending(es *ElasticsearchBackend) {
-	legacyExists, err := es.IndexExists(constants.POST_INDEX_LEGACY)
+func warnIfMigrationPending(ctx context.Context, es *ElasticsearchBackend) {
+	legacyExists, err := es.IndexExists(ctx, constants.POST_INDEX_LEGACY)
 	if err != nil || !legacyExists {
 		return
 	}
 
-	legacyCount, err := es.CountDocuments(constants.POST_INDEX_LEGACY)
+	legacyCount, err := es.CountDocuments(ctx, constants.POST_INDEX_LEGACY)
 	if err != nil || legacyCount == 0 {
 		return
 	}
 
-	currentCount, err := es.CountDocuments(constants.POST_INDEX)
+	currentCount, err := es.CountDocuments(ctx, constants.POST_INDEX)
 	if err != nil || currentCount > 0 {
 		return
 	}
@@ -140,15 +155,18 @@ MIGRATION PENDING
 `, constants.POST_INDEX_LEGACY, legacyCount, constants.POST_INDEX)
 }
 
-func ensureIndex(client *elastic.Client, index, mapping string) error {
-	exists, err := client.IndexExists(index).Do(context.Background())
+func ensureIndex(ctx context.Context, client *elastic.Client, index, mapping string) error {
+	ctx, cancel := context.WithTimeout(ctx, esAdminTimeout)
+	defer cancel()
+
+	exists, err := client.IndexExists(index).Do(ctx)
 	if err != nil {
 		return fmt.Errorf("check index %q: %w", index, err)
 	}
 	if exists {
 		return nil
 	}
-	if _, err := client.CreateIndex(index).Body(mapping).Do(context.Background()); err != nil {
+	if _, err := client.CreateIndex(index).Body(mapping).Do(ctx); err != nil {
 		return fmt.Errorf("create index %q: %w", index, err)
 	}
 	return nil
@@ -158,23 +176,32 @@ func ensureIndex(client *elastic.Client, index, mapping string) error {
 func PostMapping() string { return postMapping }
 
 // IndexExists reports whether an index is present.
-func (backend *ElasticsearchBackend) IndexExists(index string) (bool, error) {
-	return backend.client.IndexExists(index).Do(context.Background())
+func (backend *ElasticsearchBackend) IndexExists(ctx context.Context, index string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, esAdminTimeout)
+	defer cancel()
+
+	return backend.client.IndexExists(index).Do(ctx)
 }
 
 // CountDocuments returns the number of documents in an index.
-func (backend *ElasticsearchBackend) CountDocuments(index string) (int64, error) {
-	return backend.client.Count(index).Do(context.Background())
+func (backend *ElasticsearchBackend) CountDocuments(ctx context.Context, index string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
+	defer cancel()
+
+	return backend.client.Count(index).Do(ctx)
 }
 
 // EnsureIndex creates an index with the given mapping if it does not exist.
-func (backend *ElasticsearchBackend) EnsureIndex(index, mapping string) error {
-	return ensureIndex(backend.client, index, mapping)
+func (backend *ElasticsearchBackend) EnsureIndex(ctx context.Context, index, mapping string) error {
+	return ensureIndex(ctx, backend.client, index, mapping)
 }
 
 // DeleteIndex removes an index entirely. Used by tests to clean up.
-func (backend *ElasticsearchBackend) DeleteIndex(index string) error {
-	_, err := backend.client.DeleteIndex(index).Do(context.Background())
+func (backend *ElasticsearchBackend) DeleteIndex(ctx context.Context, index string) error {
+	ctx, cancel := context.WithTimeout(ctx, esAdminTimeout)
+	defer cancel()
+
+	_, err := backend.client.DeleteIndex(index).Do(ctx)
 	if err != nil {
 		if elastic.IsNotFound(err) {
 			return nil
@@ -187,12 +214,16 @@ func (backend *ElasticsearchBackend) DeleteIndex(index string) error {
 // Reindex copies every document from src into dst and returns how many were
 // written. It waits for the copy to finish and refreshes dst so the documents
 // are immediately searchable.
-func (backend *ElasticsearchBackend) Reindex(src, dst string) (int64, error) {
+//
+// Unlike the other methods this one imposes no timeout of its own: how long a
+// reindex takes is a function of how much data there is, so only the caller can
+// pick a sensible bound. cmd/reindex sets one.
+func (backend *ElasticsearchBackend) Reindex(ctx context.Context, src, dst string) (int64, error) {
 	resp, err := backend.client.Reindex().
 		SourceIndex(src).
 		DestinationIndex(dst).
 		Refresh("true").
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reindex %q into %q: %w", src, dst, err)
 	}
@@ -206,12 +237,15 @@ func (backend *ElasticsearchBackend) Reindex(src, dst string) (int64, error) {
 // Use it only for lookups that expect a single document, such as resolving a
 // username or checking ownership of one post. For anything list-shaped use
 // ReadFromESPaged: the default was silently capping search results at 10.
-func (backend *ElasticsearchBackend) ReadFromES(query elastic.Query, index string) (*elastic.SearchResult, error) {
+func (backend *ElasticsearchBackend) ReadFromES(ctx context.Context, query elastic.Query, index string) (*elastic.SearchResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
+	defer cancel()
+
 	searchResult, err := backend.client.Search().
 		Index(index).
 		Query(query).
 		Pretty(true).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -221,14 +255,17 @@ func (backend *ElasticsearchBackend) ReadFromES(query elastic.Query, index strin
 
 // ReadFromESPaged runs query with an explicit window. Callers must pass a size;
 // leaving it unset is what limited every search to 10 results.
-func (backend *ElasticsearchBackend) ReadFromESPaged(query elastic.Query, index string, from, size int) (*elastic.SearchResult, error) {
+func (backend *ElasticsearchBackend) ReadFromESPaged(ctx context.Context, query elastic.Query, index string, from, size int) (*elastic.SearchResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
+	defer cancel()
+
 	searchResult, err := backend.client.Search().
 		Index(index).
 		Query(query).
 		From(from).
 		Size(size).
 		Pretty(true).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -242,13 +279,16 @@ func (backend *ElasticsearchBackend) ReadFromESPaged(query elastic.Query, index 
 //
 // Refresh("true") makes the deletion visible to the next search. Unlike the
 // single-document delete API, _delete_by_query does not accept "wait_for".
-func (backend *ElasticsearchBackend) DeleteFromES(query elastic.Query, index string) (int64, error) {
+func (backend *ElasticsearchBackend) DeleteFromES(ctx context.Context, query elastic.Query, index string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
+	defer cancel()
+
 	resp, err := backend.client.DeleteByQuery().
 		Index(index).
 		Query(query).
 		Refresh("true").
 		Pretty(true).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -266,11 +306,14 @@ func (backend *ElasticsearchBackend) DeleteFromES(query elastic.Query, index str
 // refresh, so a value written a moment ago is visible immediately. That property
 // is what makes it the right primitive for authentication and for session
 // revocation checks.
-func (backend *ElasticsearchBackend) GetDocument(index, id string, out interface{}) (bool, error) {
+func (backend *ElasticsearchBackend) GetDocument(ctx context.Context, index, id string, out interface{}) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
+	defer cancel()
+
 	resp, err := backend.client.Get().
 		Index(index).
 		Id(id).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		if elastic.IsNotFound(err) {
 			return false, nil
@@ -290,12 +333,15 @@ func (backend *ElasticsearchBackend) GetDocument(index, id string, out interface
 // UpdateFields applies a partial update, leaving fields it does not mention
 // untouched. Used so revoking a session does not have to rewrite the password
 // hash.
-func (backend *ElasticsearchBackend) UpdateFields(index, id string, fields map[string]interface{}) error {
+func (backend *ElasticsearchBackend) UpdateFields(ctx context.Context, index, id string, fields map[string]interface{}) error {
+	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
+	defer cancel()
+
 	_, err := backend.client.Update().
 		Index(index).
 		Id(id).
 		Doc(fields).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		return fmt.Errorf("update %q in %q: %w", id, index, err)
 	}
@@ -309,17 +355,21 @@ func (backend *ElasticsearchBackend) UpdateFields(index, id string, fields map[s
 // concurrent callers cannot lose each other's increments. RetryOnConflict covers
 // the case where two requests touch the same document in the same instant.
 func (backend *ElasticsearchBackend) UpdateWithScript(
+	ctx context.Context,
 	index, id, script string,
 	params map[string]interface{},
 	upsert map[string]interface{},
 ) error {
+	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
+	defer cancel()
+
 	_, err := backend.client.Update().
 		Index(index).
 		Id(id).
 		Script(elastic.NewScript(script).Lang("painless").Params(params)).
 		Upsert(upsert).
 		RetryOnConflict(3).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		return fmt.Errorf("scripted update %q in %q: %w", id, index, err)
 	}
@@ -327,11 +377,14 @@ func (backend *ElasticsearchBackend) UpdateWithScript(
 }
 
 // DeleteDocument removes one document by id. A missing document is not an error.
-func (backend *ElasticsearchBackend) DeleteDocument(index, id string) error {
+func (backend *ElasticsearchBackend) DeleteDocument(ctx context.Context, index, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
+	defer cancel()
+
 	_, err := backend.client.Delete().
 		Index(index).
 		Id(id).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
 		if elastic.IsNotFound(err) {
 			return nil
@@ -352,12 +405,15 @@ func (backend *ElasticsearchBackend) DeleteDocument(index, id string) error {
 // The cost is up to one refresh interval of latency on the write. That is
 // preferable to a fixed client-side delay that is simultaneously too slow in the
 // common case and still a race in the worst one.
-func (backend *ElasticsearchBackend) SaveToES(i interface{}, index string, id string) error {
+func (backend *ElasticsearchBackend) SaveToES(ctx context.Context, i interface{}, index string, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
+	defer cancel()
+
 	_, err := backend.client.Index().
 		Index(index).
 		Id(id).
 		BodyJson(i).
 		Refresh("wait_for").
-		Do(context.Background())
+		Do(ctx)
 	return err
 }

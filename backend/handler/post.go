@@ -61,7 +61,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		Type:    postType,
 	}
 
-	if err := service.SavePost(&p, body, mime); err != nil {
+	if err := service.SavePost(r.Context(), &p, body, mime); err != nil {
 		http.Error(w, "Failed to save post to backend", http.StatusInternalServerError)
 		fmt.Printf("Failed to save post to backend %v\n", err)
 		return
@@ -87,7 +87,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		postType = ""
 	}
 
-	posts, err := service.SearchPosts(service.PostQuery{
+	posts, err := service.SearchPosts(r.Context(), service.PostQuery{
 		User:     q.Get("user"),
 		Keywords: q.Get("keywords"),
 		Type:     postType,
@@ -135,7 +135,7 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Ownership is enforced in the service by matching id AND user, so one user
 	// cannot delete another's post.
-	if err := service.DeletePost(id, username); err != nil {
+	if err := service.DeletePost(r.Context(), id, username); err != nil {
 		if errors.Is(err, service.ErrPostNotFound) {
 			http.Error(w, "Post not found", http.StatusNotFound)
 			return

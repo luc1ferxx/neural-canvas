@@ -43,7 +43,7 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 	// instances. If that lookup fails, Elasticsearch is unreachable and the
 	// credential check below would fail anyway -- so this logs and continues
 	// rather than locking everyone out on a transient error.
-	allowed, err := service.LoginAllowed(user.Username)
+	allowed, err := service.LoginAllowed(r.Context(), user.Username)
 	if err != nil {
 		fmt.Printf("Could not read login throttle for %q: %v\n", user.Username, err)
 	} else if !allowed {
@@ -52,7 +52,7 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	success, err := service.CheckUser(user.Username, user.Password)
+	success, err := service.CheckUser(r.Context(), user.Username, user.Password)
 	if err != nil {
 		http.Error(w, "Failed to verify credentials", http.StatusInternalServerError)
 		fmt.Printf("Failed to verify credentials %v\n", err)
@@ -60,14 +60,14 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !success {
-		if err := service.RecordLoginFailure(user.Username); err != nil {
+		if err := service.RecordLoginFailure(r.Context(), user.Username); err != nil {
 			fmt.Printf("Could not record login failure for %q: %v\n", user.Username, err)
 		}
 		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
 		return
 	}
 
-	if err := service.ClearLoginFailures(user.Username); err != nil {
+	if err := service.ClearLoginFailures(r.Context(), user.Username); err != nil {
 		fmt.Printf("Could not clear login failures for %q: %v\n", user.Username, err)
 	}
 
@@ -112,7 +112,7 @@ func signupHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := service.AddUser(user); err != nil {
+	if err := service.AddUser(r.Context(), user); err != nil {
 		if errors.Is(err, service.ErrUserExists) {
 			http.Error(w, "User already exists", http.StatusBadRequest)
 			return

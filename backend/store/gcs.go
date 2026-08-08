@@ -22,8 +22,8 @@ type GoogleCloudStorageBackend struct {
 
 // InitGCSBackend returns an error rather than panicking so startup failures are
 // reportable.
-func InitGCSBackend() error {
-	client, err := storage.NewClient(context.Background())
+func InitGCSBackend(ctx context.Context) error {
+	client, err := storage.NewClient(ctx)
 	if err != nil {
 		return fmt.Errorf("create GCS client: %w", err)
 	}
@@ -44,10 +44,12 @@ func InitGCSBackend() error {
 //
 // Objects are left world-readable: these are images meant to be shared, and the
 // frontend renders them directly from this URL.
-func (backend *GoogleCloudStorageBackend) SaveToGCS(r io.Reader, objectName, contentType string) (string, error) {
-	// A cancelable context is how an in-flight upload is abandoned: returning
-	// without Close never finalizes the object, and cancel releases the stream.
-	ctx, cancel := context.WithCancel(context.Background())
+func (backend *GoogleCloudStorageBackend) SaveToGCS(ctx context.Context, r io.Reader, objectName, contentType string) (string, error) {
+	// Derived from the caller's context, so a client that hangs up mid-upload
+	// abandons the transfer instead of streaming the rest into the bucket on its
+	// behalf. Returning without Close never finalizes the object, and cancel
+	// releases the stream.
+	ctx, cancel := context.WithTimeout(ctx, gcsUploadTimeout)
 	defer cancel()
 
 	object := backend.client.Bucket(backend.bucket).Object(objectName)
@@ -82,8 +84,9 @@ func (backend *GoogleCloudStorageBackend) SaveToGCS(r io.Reader, objectName, con
 //
 // This matters for the delete flow: every object is world-readable, so leaving
 // the file behind would keep a "deleted" image publicly fetchable by its URL.
-func (backend *GoogleCloudStorageBackend) DeleteFromGCS(objectName string) error {
-	ctx := context.Background()
+func (backend *GoogleCloudStorageBackend) DeleteFromGCS(ctx context.Context, objectName string) error {
+	ctx, cancel := context.WithTimeout(ctx, gcsDeleteTimeout)
+	defer cancel()
 
 	err := backend.client.Bucket(backend.bucket).Object(objectName).Delete(ctx)
 	if errors.Is(err, storage.ErrObjectNotExist) {

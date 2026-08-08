@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"reflect"
@@ -64,9 +65,9 @@ func buildPostQuery(q PostQuery) elastic.Query {
 // Filtering by type happens here rather than in the browser. The frontend used
 // to fetch one page and split it into tabs client side, so a tab could report
 // "No images!" while images existed further down the result set.
-func SearchPosts(q PostQuery) ([]model.Post, error) {
+func SearchPosts(ctx context.Context, q PostQuery) ([]model.Post, error) {
 	searchResult, err := store.ESBackend.ReadFromESPaged(
-		buildPostQuery(q), constants.POST_INDEX, q.From, q.Size)
+		ctx, buildPostQuery(q), constants.POST_INDEX, q.From, q.Size)
 	if err != nil {
 		return nil, err
 	}
@@ -90,14 +91,14 @@ func getPostFromSearchResult(searchResult *elastic.SearchResult) []model.Post {
 //
 // contentType must already have been validated against the media allowlist; it
 // is applied to the stored object so GCS does not sniff a type at serve time.
-func SavePost(post *model.Post, file io.Reader, contentType string) error {
-	medialink, err := store.GCSBackend.SaveToGCS(file, post.Id, contentType)
+func SavePost(ctx context.Context, post *model.Post, file io.Reader, contentType string) error {
+	medialink, err := store.GCSBackend.SaveToGCS(ctx, file, post.Id, contentType)
 	if err != nil {
 		return err
 	}
 	post.Url = medialink
 
-	return store.ESBackend.SaveToES(post, constants.POST_INDEX, post.Id)
+	return store.ESBackend.SaveToES(ctx, post, constants.POST_INDEX, post.Id)
 }
 
 // DeletePost removes a post and its stored media, but only if it belongs to
@@ -107,7 +108,7 @@ func SavePost(post *model.Post, file io.Reader, contentType string) error {
 // publicly readable, so if only one of the two can succeed it must be the file:
 // a post row pointing at a missing image is a broken thumbnail, whereas an
 // orphaned file remains fetchable by anyone holding the URL.
-func DeletePost(id string, user string) error {
+func DeletePost(ctx context.Context, id string, user string) error {
 	query := elastic.NewBoolQuery()
 	query.Must(elastic.NewTermQuery("id", id))
 	query.Must(elastic.NewTermQuery("user", user))
@@ -115,7 +116,7 @@ func DeletePost(id string, user string) error {
 	// Confirm ownership first: DeleteByQuery on its own reports success even
 	// when it matched nothing, which would tell the user their delete worked
 	// when it had not.
-	searchResult, err := store.ESBackend.ReadFromES(query, constants.POST_INDEX)
+	searchResult, err := store.ESBackend.ReadFromES(ctx, query, constants.POST_INDEX)
 	if err != nil {
 		return err
 	}
@@ -123,11 +124,11 @@ func DeletePost(id string, user string) error {
 		return ErrPostNotFound
 	}
 
-	if err := store.GCSBackend.DeleteFromGCS(id); err != nil {
+	if err := store.GCSBackend.DeleteFromGCS(ctx, id); err != nil {
 		return err
 	}
 
-	deleted, err := store.ESBackend.DeleteFromES(query, constants.POST_INDEX)
+	deleted, err := store.ESBackend.DeleteFromES(ctx, query, constants.POST_INDEX)
 	if err != nil {
 		return err
 	}

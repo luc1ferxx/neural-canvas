@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -37,7 +38,7 @@ const legacyPostMapping = `{
     }
 }`
 
-func setupIntegration(t *testing.T) {
+func setupIntegration(t *testing.T) context.Context {
 	t.Helper()
 
 	esURL := os.Getenv("ES_TEST_URL")
@@ -56,9 +57,11 @@ func setupIntegration(t *testing.T) {
 	if err := config.Load(); err != nil {
 		t.Fatalf("config.Load(): %v", err)
 	}
-	if err := store.InitElasticsearchBackend(); err != nil {
+	ctx := t.Context()
+	if err := store.InitElasticsearchBackend(ctx); err != nil {
 		t.Fatalf("InitElasticsearchBackend(): %v", err)
 	}
+	return ctx
 }
 
 // uniqueName keeps documents from colliding across tests and across runs.
@@ -69,14 +72,14 @@ func uniqueName(prefix string) string {
 // TestIntegrationMappingsAreAccepted is the cheapest useful check: if any mapping
 // in elasticsearch.go were malformed, index creation would fail here.
 func TestIntegrationMappingsAreAccepted(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	for _, index := range []string{
 		constants.USER_INDEX,
 		constants.POST_INDEX,
 		constants.LOGIN_ATTEMPT_INDEX,
 	} {
-		exists, err := store.ESBackend.IndexExists(index)
+		exists, err := store.ESBackend.IndexExists(ctx, index)
 		if err != nil {
 			t.Fatalf("IndexExists(%q): %v", index, err)
 		}
@@ -87,18 +90,18 @@ func TestIntegrationMappingsAreAccepted(t *testing.T) {
 }
 
 func TestIntegrationSignupThenImmediateLogin(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	username := uniqueName("racer")
 	password := "correct-horse"
 
-	if err := AddUser(&model.User{Username: username, Password: password}); err != nil {
+	if err := AddUser(ctx, &model.User{Username: username, Password: password}); err != nil {
 		t.Fatalf("AddUser(): %v", err)
 	}
 
 	// No sleep. This used to be a race: the user document was not searchable for
 	// up to a refresh interval, so a login immediately after signup could fail.
-	ok, err := CheckUser(username, password)
+	ok, err := CheckUser(ctx, username, password)
 	if err != nil {
 		t.Fatalf("CheckUser(): %v", err)
 	}
@@ -108,16 +111,16 @@ func TestIntegrationSignupThenImmediateLogin(t *testing.T) {
 }
 
 func TestIntegrationPasswordIsHashedNotStored(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	username := uniqueName("hashed")
 	password := "plaintext-should-never-appear"
 
-	if err := AddUser(&model.User{Username: username, Password: password}); err != nil {
+	if err := AddUser(ctx, &model.User{Username: username, Password: password}); err != nil {
 		t.Fatalf("AddUser(): %v", err)
 	}
 
-	stored, found, err := getUser(username)
+	stored, found, err := getUser(ctx, username)
 	if err != nil || !found {
 		t.Fatalf("getUser(): found=%v err=%v", found, err)
 	}
@@ -129,24 +132,24 @@ func TestIntegrationPasswordIsHashedNotStored(t *testing.T) {
 		t.Errorf("stored credential does not look like a bcrypt hash: %q", stored.Password)
 	}
 
-	if ok, _ := CheckUser(username, "wrong-password"); ok {
+	if ok, _ := CheckUser(ctx, username, "wrong-password"); ok {
 		t.Error("CheckUser accepted a wrong password")
 	}
-	if ok, _ := CheckUser(username, password); !ok {
+	if ok, _ := CheckUser(ctx, username, password); !ok {
 		t.Error("CheckUser rejected the correct password")
 	}
 }
 
 func TestIntegrationDuplicateSignupRejected(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	username := uniqueName("dupe")
 	user := model.User{Username: username, Password: "some-password"}
 
-	if err := AddUser(&user); err != nil {
+	if err := AddUser(ctx, &user); err != nil {
 		t.Fatalf("first AddUser(): %v", err)
 	}
-	if err := AddUser(&user); !errors.Is(err, ErrUserExists) {
+	if err := AddUser(ctx, &user); !errors.Is(err, ErrUserExists) {
 		t.Errorf("second AddUser() = %v, want ErrUserExists", err)
 	}
 }
@@ -154,11 +157,11 @@ func TestIntegrationDuplicateSignupRejected(t *testing.T) {
 // TestIntegrationLoginThrottle exercises the Painless script. A syntax error or a
 // wrong field name there would not surface anywhere else.
 func TestIntegrationLoginThrottle(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	username := uniqueName("throttled")
 
-	allowed, err := LoginAllowed(username)
+	allowed, err := LoginAllowed(ctx, username)
 	if err != nil {
 		t.Fatalf("LoginAllowed() on a fresh name: %v", err)
 	}
@@ -167,12 +170,12 @@ func TestIntegrationLoginThrottle(t *testing.T) {
 	}
 
 	for i := 1; i <= MaxLoginFailures; i++ {
-		if err := RecordLoginFailure(username); err != nil {
+		if err := RecordLoginFailure(ctx, username); err != nil {
 			t.Fatalf("RecordLoginFailure() #%d: %v", i, err)
 		}
 	}
 
-	allowed, err = LoginAllowed(username)
+	allowed, err = LoginAllowed(ctx, username)
 	if err != nil {
 		t.Fatalf("LoginAllowed() after %d failures: %v", MaxLoginFailures, err)
 	}
@@ -181,10 +184,10 @@ func TestIntegrationLoginThrottle(t *testing.T) {
 	}
 
 	// A successful sign-in clears the count.
-	if err := ClearLoginFailures(username); err != nil {
+	if err := ClearLoginFailures(ctx, username); err != nil {
 		t.Fatalf("ClearLoginFailures(): %v", err)
 	}
-	allowed, err = LoginAllowed(username)
+	allowed, err = LoginAllowed(ctx, username)
 	if err != nil {
 		t.Fatalf("LoginAllowed() after clear: %v", err)
 	}
@@ -196,19 +199,19 @@ func TestIntegrationLoginThrottle(t *testing.T) {
 // TestIntegrationThrottleIncrementsAtomically checks the script actually
 // accumulates rather than overwriting, which is the whole reason it is a script.
 func TestIntegrationThrottleIncrementsAtomically(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	username := uniqueName("counter")
 
 	for i := 0; i < 3; i++ {
-		if err := RecordLoginFailure(username); err != nil {
+		if err := RecordLoginFailure(ctx, username); err != nil {
 			t.Fatalf("RecordLoginFailure() #%d: %v", i+1, err)
 		}
 	}
 
 	var attempt loginAttempt
 	found, err := store.ESBackend.GetDocument(
-		constants.LOGIN_ATTEMPT_INDEX, username, &attempt)
+		ctx, constants.LOGIN_ATTEMPT_INDEX, username, &attempt)
 	if err != nil || !found {
 		t.Fatalf("GetDocument(): found=%v err=%v", found, err)
 	}
@@ -224,14 +227,14 @@ func TestIntegrationThrottleIncrementsAtomically(t *testing.T) {
 
 // TestIntegrationTokenRevocation covers the logout path end to end.
 func TestIntegrationTokenRevocation(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	username := uniqueName("revoked")
-	if err := AddUser(&model.User{Username: username, Password: "some-password"}); err != nil {
+	if err := AddUser(ctx, &model.User{Username: username, Password: "some-password"}); err != nil {
 		t.Fatalf("AddUser(): %v", err)
 	}
 
-	validAfter, err := TokensValidAfter(username)
+	validAfter, err := TokensValidAfter(ctx, username)
 	if err != nil {
 		t.Fatalf("TokensValidAfter(): %v", err)
 	}
@@ -241,11 +244,11 @@ func TestIntegrationTokenRevocation(t *testing.T) {
 
 	issuedAt := time.Now().Unix()
 
-	if err := RevokeTokens(username); err != nil {
+	if err := RevokeTokens(ctx, username); err != nil {
 		t.Fatalf("RevokeTokens(): %v", err)
 	}
 
-	validAfter, err = TokensValidAfter(username)
+	validAfter, err = TokensValidAfter(ctx, username)
 	if err != nil {
 		t.Fatalf("TokensValidAfter() after revoke: %v", err)
 	}
@@ -259,23 +262,23 @@ func TestIntegrationTokenRevocation(t *testing.T) {
 
 	// Revoking must not damage the credential: the partial update has to leave
 	// the password hash alone.
-	if ok, err := CheckUser(username, "some-password"); err != nil || !ok {
+	if ok, err := CheckUser(ctx, username, "some-password"); err != nil || !ok {
 		t.Errorf("the password stopped working after revocation: ok=%v err=%v", ok, err)
 	}
 }
 
 func TestIntegrationRevokingUnknownUserIsHarmless(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
-	if err := RevokeTokens(uniqueName("ghost")); err != nil {
+	if err := RevokeTokens(ctx, uniqueName("ghost")); err != nil {
 		t.Errorf("RevokeTokens() on a missing user returned %v, want nil", err)
 	}
 }
 
 // indexPost writes a post directly, bypassing SavePost so the test needs no GCS.
-func indexPost(t *testing.T, index string, p model.Post) {
+func indexPost(ctx context.Context, t *testing.T, index string, p model.Post) {
 	t.Helper()
-	if err := store.ESBackend.SaveToES(&p, index, p.Id); err != nil {
+	if err := store.ESBackend.SaveToES(ctx, &p, index, p.Id); err != nil {
 		t.Fatalf("SaveToES(): %v", err)
 	}
 }
@@ -283,23 +286,23 @@ func indexPost(t *testing.T, index string, p model.Post) {
 // TestIntegrationTypeFilterIsAppliedByElasticsearch is the test that proves the
 // migration was necessary. On the legacy mapping this filter matches nothing.
 func TestIntegrationTypeFilterIsAppliedByElasticsearch(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	author := uniqueName("author")
 	for i := 0; i < 3; i++ {
-		indexPost(t, constants.POST_INDEX, model.Post{
+		indexPost(ctx, t, constants.POST_INDEX, model.Post{
 			Id: uniqueName("img"), User: author, Message: "a picture", Type: "image",
 			Url: "https://example.invalid/i.png",
 		})
 	}
 	for i := 0; i < 2; i++ {
-		indexPost(t, constants.POST_INDEX, model.Post{
+		indexPost(ctx, t, constants.POST_INDEX, model.Post{
 			Id: uniqueName("vid"), User: author, Message: "a clip", Type: "video",
 			Url: "https://example.invalid/v.mp4",
 		})
 	}
 
-	images, err := SearchPosts(PostQuery{User: author, Type: "image", Size: 50})
+	images, err := SearchPosts(ctx, PostQuery{User: author, Type: "image", Size: 50})
 	if err != nil {
 		t.Fatalf("SearchPosts(image): %v", err)
 	}
@@ -312,7 +315,7 @@ func TestIntegrationTypeFilterIsAppliedByElasticsearch(t *testing.T) {
 		}
 	}
 
-	videos, err := SearchPosts(PostQuery{User: author, Type: "video", Size: 50})
+	videos, err := SearchPosts(ctx, PostQuery{User: author, Type: "video", Size: 50})
 	if err != nil {
 		t.Fatalf("SearchPosts(video): %v", err)
 	}
@@ -320,7 +323,7 @@ func TestIntegrationTypeFilterIsAppliedByElasticsearch(t *testing.T) {
 		t.Errorf("got %d videos, want 2", len(videos))
 	}
 
-	both, err := SearchPosts(PostQuery{User: author, Size: 50})
+	both, err := SearchPosts(ctx, PostQuery{User: author, Size: 50})
 	if err != nil {
 		t.Fatalf("SearchPosts(all): %v", err)
 	}
@@ -332,18 +335,18 @@ func TestIntegrationTypeFilterIsAppliedByElasticsearch(t *testing.T) {
 // TestIntegrationPaginationReturnsMoreThanTen is the regression guard for the
 // silent Elasticsearch default that capped every search at 10 hits.
 func TestIntegrationPaginationReturnsMoreThanTen(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	author := uniqueName("prolific")
 	const total = 25
 	for i := 0; i < total; i++ {
-		indexPost(t, constants.POST_INDEX, model.Post{
+		indexPost(ctx, t, constants.POST_INDEX, model.Post{
 			Id: uniqueName("p"), User: author, Message: "post", Type: "image",
 			Url: "https://example.invalid/p.png",
 		})
 	}
 
-	posts, err := SearchPosts(PostQuery{User: author, Size: 50})
+	posts, err := SearchPosts(ctx, PostQuery{User: author, Size: 50})
 	if err != nil {
 		t.Fatalf("SearchPosts(): %v", err)
 	}
@@ -351,11 +354,11 @@ func TestIntegrationPaginationReturnsMoreThanTen(t *testing.T) {
 		t.Errorf("got %d posts, want %d (the old default capped this at 10)", len(posts), total)
 	}
 
-	firstPage, err := SearchPosts(PostQuery{User: author, From: 0, Size: 10})
+	firstPage, err := SearchPosts(ctx, PostQuery{User: author, From: 0, Size: 10})
 	if err != nil {
 		t.Fatalf("SearchPosts(page 1): %v", err)
 	}
-	secondPage, err := SearchPosts(PostQuery{User: author, From: 10, Size: 10})
+	secondPage, err := SearchPosts(ctx, PostQuery{User: author, From: 10, Size: 10})
 	if err != nil {
 		t.Fatalf("SearchPosts(page 2): %v", err)
 	}
@@ -370,25 +373,25 @@ func TestIntegrationPaginationReturnsMoreThanTen(t *testing.T) {
 // TestIntegrationLegacyMappingCannotFilterByType demonstrates the problem the
 // reindex solves, then verifies the migration fixes it.
 func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
-	setupIntegration(t)
+	ctx := setupIntegration(t)
 
 	legacy := uniqueName("legacy_post_")
-	if err := store.ESBackend.EnsureIndex(legacy, legacyPostMapping); err != nil {
+	if err := store.ESBackend.EnsureIndex(ctx, legacy, legacyPostMapping); err != nil {
 		t.Fatalf("create legacy index: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = store.ESBackend.DeleteIndex(legacy)
+		_ = store.ESBackend.DeleteIndex(context.Background(), legacy)
 	})
 
 	author := uniqueName("legacyauthor")
-	indexPost(t, legacy, model.Post{
+	indexPost(ctx, t, legacy, model.Post{
 		Id: uniqueName("l"), User: author, Message: "old post", Type: "image",
 		Url: "https://example.invalid/old.png",
 	})
 
 	// Confirm the document is there when not filtering by type.
 	all, err := store.ESBackend.ReadFromESPaged(
-		buildPostQuery(PostQuery{User: author}), legacy, 0, 50)
+		ctx, buildPostQuery(PostQuery{User: author}), legacy, 0, 50)
 	if err != nil {
 		t.Fatalf("read legacy index: %v", err)
 	}
@@ -405,7 +408,7 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 	// index would fail every search, not degrade quietly -- see the startup
 	// warning in store.InitElasticsearchBackend.
 	filtered, err := store.ESBackend.ReadFromESPaged(
-		buildPostQuery(PostQuery{User: author, Type: "image"}), legacy, 0, 50)
+		ctx, buildPostQuery(PostQuery{User: author, Type: "image"}), legacy, 0, 50)
 	if err == nil && filtered.TotalHits() > 0 {
 		t.Errorf("the legacy mapping unexpectedly served a type filter (%d hits); "+
 			"if that were possible the migration would be unnecessary", filtered.TotalHits())
@@ -416,14 +419,14 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 
 	// Now migrate and confirm the same filter works.
 	target := uniqueName("migrated_post_")
-	if err := store.ESBackend.EnsureIndex(target, store.PostMapping()); err != nil {
+	if err := store.ESBackend.EnsureIndex(ctx, target, store.PostMapping()); err != nil {
 		t.Fatalf("create target index: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = store.ESBackend.DeleteIndex(target)
+		_ = store.ESBackend.DeleteIndex(context.Background(), target)
 	})
 
-	copied, err := store.ESBackend.Reindex(legacy, target)
+	copied, err := store.ESBackend.Reindex(ctx, legacy, target)
 	if err != nil {
 		t.Fatalf("Reindex(): %v", err)
 	}
@@ -432,7 +435,7 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 	}
 
 	migrated, err := store.ESBackend.ReadFromESPaged(
-		buildPostQuery(PostQuery{User: author, Type: "image"}), target, 0, 50)
+		ctx, buildPostQuery(PostQuery{User: author, Type: "image"}), target, 0, 50)
 	if err != nil {
 		t.Fatalf("read migrated index: %v", err)
 	}

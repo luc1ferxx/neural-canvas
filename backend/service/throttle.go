@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -49,10 +50,10 @@ if (ctx._source.firstAttempt == null ||
 // Engine the only available IP is the load balancer's or a client-supplied
 // X-Forwarded-For, and the latter is trivially varied to defeat an IP-keyed
 // limiter.
-func LoginAllowed(username string) (bool, error) {
+func LoginAllowed(ctx context.Context, username string) (bool, error) {
 	var attempt loginAttempt
 	found, err := store.ESBackend.GetDocument(
-		constants.LOGIN_ATTEMPT_INDEX, username, &attempt)
+		ctx, constants.LOGIN_ATTEMPT_INDEX, username, &attempt)
 	if err != nil {
 		return false, err
 	}
@@ -69,10 +70,11 @@ func LoginAllowed(username string) (bool, error) {
 }
 
 // RecordLoginFailure counts one failed sign-in.
-func RecordLoginFailure(username string) error {
+func RecordLoginFailure(ctx context.Context, username string) error {
 	now := time.Now().Unix()
 
 	return store.ESBackend.UpdateWithScript(
+		ctx,
 		constants.LOGIN_ATTEMPT_INDEX,
 		username,
 		incrementScript,
@@ -89,9 +91,9 @@ func RecordLoginFailure(username string) error {
 }
 
 // ClearLoginFailures resets the counter after a successful sign-in.
-func ClearLoginFailures(username string) error {
+func ClearLoginFailures(ctx context.Context, username string) error {
 	if err := store.ESBackend.DeleteDocument(
-		constants.LOGIN_ATTEMPT_INDEX, username); err != nil {
+		ctx, constants.LOGIN_ATTEMPT_INDEX, username); err != nil {
 		return fmt.Errorf("clear login failures for %q: %w", username, err)
 	}
 	return nil

@@ -76,7 +76,7 @@ func requireLiveSession(next http.Handler) http.Handler {
 			return
 		}
 
-		validAfter, err := service.TokensValidAfter(username)
+		validAfter, err := service.TokensValidAfter(r.Context(), username)
 		if err != nil {
 			http.Error(w, "Failed to verify session", http.StatusInternalServerError)
 			fmt.Printf("Failed to verify session for %q: %v\n", username, err)
@@ -103,7 +103,7 @@ func signoutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := service.RevokeTokens(username); err != nil {
+	if err := service.RevokeTokens(r.Context(), username); err != nil {
 		http.Error(w, "Failed to sign out", http.StatusInternalServerError)
 		fmt.Printf("Failed to revoke tokens for %q: %v\n", username, err)
 		return

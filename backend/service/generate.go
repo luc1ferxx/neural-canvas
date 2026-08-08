@@ -28,6 +28,9 @@ const (
 	generateTimeout = 120 * time.Second
 	// downloadTimeout covers fetching the rendered image from OpenAI's CDN.
 	downloadTimeout = 60 * time.Second
+	// persistTimeout bounds the GCS upload and the index write that follow a
+	// billed generation, which deliberately run detached from the request.
+	persistTimeout = 3 * time.Minute
 )
 
 var generateClient = &http.Client{Timeout: generateTimeout}
@@ -81,13 +84,26 @@ func GenerateAndSavePost(ctx context.Context, username, prompt string) (*model.P
 		Type:    postType,
 	}
 
-	url, err := store.GCSBackend.SaveToGCS(body, post.Id, mime)
+	// OpenAI has already been billed for this image by the time we get here, and
+	// the call it was billed for routinely takes 10-30 seconds -- long enough that
+	// a client hanging up mid-wait is a normal occurrence, not an edge case. If the
+	// request context cancelled these two writes, the money would be spent and the
+	// image discarded, and the user would see nothing for it.
+	//
+	// context.WithoutCancel keeps the values (the request id, so the logs still
+	// correlate) while dropping the cancellation, and the timeout replaces the
+	// bound that was just given up. Everything before this point is still
+	// cancellable, because nothing before this point has cost anything.
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
+	defer cancel()
+
+	url, err := store.GCSBackend.SaveToGCS(persistCtx, body, post.Id, mime)
 	if err != nil {
 		return nil, fmt.Errorf("save generated image: %w", err)
 	}
 	post.Url = url
 
-	if err := store.ESBackend.SaveToES(post, constants.POST_INDEX, post.Id); err != nil {
+	if err := store.ESBackend.SaveToES(persistCtx, post, constants.POST_INDEX, post.Id); err != nil {
 		return nil, fmt.Errorf("index generated post: %w", err)
 	}
 
