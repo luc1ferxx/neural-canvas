@@ -20,6 +20,13 @@ import (
 //
 //	ES_TEST_URL=http://127.0.0.1:9200 go test ./service/... -run Integration -v
 //
+// Credentials come from ES_TEST_USERNAME and ES_TEST_PASSWORD and default to
+// placeholders, which is enough for a cluster with xpack.security disabled. They
+// are overridable because a cluster that does check them is the only way to
+// exercise the credential half of the config at all -- with security off, any
+// username and password work, so a suite that hardcoded them proved only that
+// something was sent.
+//
 // They exist because the interesting failure modes here are not compile errors.
 // A mapping can be rejected, a Painless script can be invalid, "index": false
 // silently makes a filter match nothing, and a reindex can drop fields. None of
@@ -48,8 +55,8 @@ func setupIntegration(t *testing.T) context.Context {
 	}
 
 	t.Setenv("ES_URL", esURL)
-	t.Setenv("ES_USERNAME", "test")
-	t.Setenv("ES_PASSWORD", "test")
+	t.Setenv("ES_USERNAME", envOr("ES_TEST_USERNAME", "test"))
+	t.Setenv("ES_PASSWORD", envOr("ES_TEST_PASSWORD", "test"))
 	t.Setenv("GCS_BUCKET", "test-bucket")
 	t.Setenv("OPENAI_API_KEY", "sk-test")
 	t.Setenv("JWT_SECRET", "0123456789012345678901234567890123456789")
@@ -63,6 +70,13 @@ func setupIntegration(t *testing.T) context.Context {
 		t.Fatalf("InitElasticsearchBackend(): %v", err)
 	}
 	return ctx
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // uniqueName keeps documents from colliding across tests and across runs.

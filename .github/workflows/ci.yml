@@ -66,7 +66,7 @@ jobs:
         run: go test -race -count=1 ./...
 
   integration:
-    name: Integration (Go + Elasticsearch)
+    name: Integration (Go + Elasticsearch + storage emulator)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -74,19 +74,65 @@ jobs:
 
     # These tests cover what compiling cannot: that the mappings are accepted,
     # that the Painless throttle script increments rather than overwrites, that
-    # an "index": false field really cannot be filtered on, and that the reindex
-    # preserves fields. They skip automatically when ES_TEST_URL is unset.
+    # an "index": false field really cannot be filtered on, that the reindex
+    # preserves fields, and that an object written to storage comes back with the
+    # bytes, the content type and the public-read ACL it was given. They skip
+    # automatically when ES_TEST_URL and GCS_TEST_EMULATOR are unset.
     services:
       elasticsearch:
         image: docker.elastic.co/elasticsearch/elasticsearch:7.17.24
         env:
           discovery.type: single-node
-          xpack.security.enabled: "false"
+          # Security on, so ES_USERNAME/ES_PASSWORD are checked rather than
+          # accepted. With it off, any credentials work, and the suite proved
+          # only that something was sent -- which is how it ran for a while.
+          xpack.security.enabled: "true"
+          # Not a secret: it exists for the lifetime of one job, on a cluster
+          # reachable only from that job.
+          ELASTIC_PASSWORD: ci-local-password
           ES_JAVA_OPTS: -Xms512m -Xmx512m
         ports:
           - 9200:9200
         options: >-
-          --health-cmd "curl -f http://localhost:9200/_cluster/health || exit 1"
+          --health-cmd "curl -f -u elastic:ci-local-password http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+
+      # The storage paths had no coverage at all before this: no unit test, no
+      # integration test, no manual run. Running them found a live bug.
+      fake-gcs:
+        image: fsouza/fake-gcs-server:1.55.1
+        # Configured entirely through environment variables because a service
+        # container cannot be given command arguments -- only `env` and docker's
+        # own `options`. Every flag has an env equivalent, which is the only reason
+        # this works as a service rather than a `docker run` step.
+        env:
+          # The default is https. The storage client talks plain http to
+          # STORAGE_EMULATOR_HOST, so without this every call fails in the TLS
+          # handshake.
+          FAKE_GCS_SCHEME: http
+          FAKE_GCS_PORT: "4443"
+          # The default filesystem backend answers object ACL updates with "500
+          # not implemented", which fails every upload, since SaveToGCS sets
+          # public-read and treats a failure there as fatal. The memory backend
+          # implements ACLs. This matches docker-compose.yml on purpose: a suite
+          # that passes against a different backend than the stack uses is how
+          # this was found in the first place.
+          FAKE_GCS_BACKEND: memory
+          # Not cosmetic, despite the names. The default public host is
+          # storage.googleapis.com, and the client builds object *read* URLs
+          # against it, so downloads 404 with "object doesn't exist" on an object
+          # whose metadata the same client just fetched successfully. Verified by
+          # running the suite with these unset: three tests fail on the read, and
+          # only on the read.
+          FAKE_GCS_PUBLIC_HOST: localhost:4443
+          FAKE_GCS_EXTERNAL_URL: http://localhost:4443
+        ports:
+          - 4443:4443
+        # wget, not curl: the image is alpine-based and has no curl.
+        options: >-
+          --health-cmd "wget -q -O - http://localhost:4443/storage/v1/b || exit 1"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 12
@@ -102,7 +148,7 @@ jobs:
       - name: Wait for Elasticsearch
         run: |
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:9200 >/dev/null; then
+            if curl -sf -u elastic:ci-local-password http://localhost:9200 >/dev/null; then
               echo "Elasticsearch is up."
               exit 0
             fi
@@ -115,6 +161,105 @@ jobs:
         run: go test -count=1 -run Integration -v ./...
         env:
           ES_TEST_URL: http://localhost:9200
+          ES_TEST_USERNAME: elastic
+          ES_TEST_PASSWORD: ci-local-password
+          GCS_TEST_EMULATOR: localhost:4443
+
+  stack:
+    name: Offline stack (docker compose)
+    runs-on: ubuntu-latest
+
+    # This job exists because docker-compose.yml is the one artifact in this repo
+    # that cannot be checked by reading it. A wrong image tag, a healthcheck using
+    # a binary the image does not ship, a service reached by a name that does not
+    # resolve, or an emulator flag that turns out to be load-bearing all look
+    # exactly like a working file. Every one of those was a real mistake in an
+    # earlier draft of it.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate the compose file
+        run: docker compose config -q
+
+      # --wait blocks until every service with a healthcheck reports healthy, so a
+      # failure here is a startup failure rather than a smoke test racing the boot.
+      - name: Build and start the stack
+        run: docker compose up -d --build --wait --wait-timeout 360
+
+      - name: Smoke test the whole path
+        run: |
+          set -euo pipefail
+
+          # `|| true` is not optional. Without it, a refused connection makes curl
+          # exit non-zero and set -e ends the run with curl's exit code and no
+          # annotation -- which reads as "the smoke test broke" rather than "the
+          # stack is not up". curl still writes 000 as the status, so the checks
+          # below report it. Verified by running this script against a stopped
+          # backend.
+          status() { curl -s -o "$1" -w '%{http_code}' "${@:2}" || true; }
+
+          echo "--- the frontend is served"
+          code=$(status /dev/null http://localhost:3000/)
+          [ "$code" = "200" ] || { echo "::error::frontend returned $code"; exit 1; }
+
+          user="ci-smoke-$RANDOM$RANDOM"
+          pass="ci-smoke-password"
+
+          echo "--- signup"
+          code=$(status /dev/null -X POST http://localhost:8080/signup \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"$user\",\"password\":\"$pass\",\"age\":30,\"gender\":\"other\"}")
+          [ "$code" = "200" ] || { echo "::error::signup returned $code"; exit 1; }
+
+          echo "--- signin"
+          code=$(status /tmp/signin.json -X POST http://localhost:8080/signin \
+            -H 'Content-Type: application/json' \
+            -d "{\"username\":\"$user\",\"password\":\"$pass\"}")
+          [ "$code" = "200" ] || { echo "::error::signin returned $code"; exit 1; }
+          token=$(jq -r .token /tmp/signin.json)
+          [ -n "$token" ] && [ "$token" != "null" ] || { echo "::error::no token in signin response"; exit 1; }
+
+          echo "--- generate (stub provider: no OpenAI call, no spend)"
+          code=$(status /tmp/post.json -X POST http://localhost:8080/generate \
+            -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            -d '{"prompt":"a lighthouse in a storm"}')
+          [ "$code" = "200" ] || { echo "::error::generate returned $code: $(cat /tmp/post.json)"; exit 1; }
+          id=$(jq -r .id /tmp/post.json)
+          url=$(jq -r .url /tmp/post.json)
+          echo "    id=$id"
+          echo "    url=$url"
+          [ "$(jq -r .type /tmp/post.json)" = "image" ] || { echo "::error::post type is not image"; exit 1; }
+
+          # The point of -external-url: this URL is the one a browser loads, so it
+          # has to work from the host with no credentials and no headers.
+          echo "--- fetch the image anonymously, as a browser would"
+          # Split with parameter expansion rather than `read`: curl's -w output has
+          # no trailing newline, so read returns non-zero at EOF and set -e kills
+          # the script before it can report anything.
+          out=$(curl -s -o /tmp/img.png -w '%{http_code} %{content_type}' "$url" || true)
+          code="${out%% *}"
+          ctype="${out#* }"
+          [ "$code" = "200" ] || { echo "::error::image URL returned $code"; exit 1; }
+          case "$ctype" in image/png*) ;; *) echo "::error::image content type is $ctype"; exit 1;; esac
+          head -c 8 /tmp/img.png | od -An -tx1 | tr -s ' ' | grep -q '89 50 4e 47' \
+            || { echo "::error::the fetched bytes are not a PNG"; exit 1; }
+
+          echo "--- delete the post, and confirm the object really went with it"
+          code=$(status /dev/null -X DELETE "http://localhost:8080/post/$id" \
+            -H "Authorization: Bearer $token")
+          [ "$code" = "200" ] || { echo "::error::delete returned $code"; exit 1; }
+          code=$(status /dev/null "$url")
+          [ "$code" = "404" ] || { echo "::error::deleted image is still fetchable ($code)"; exit 1; }
+
+          echo "--- the whole offline path works"
+
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
 
   frontend:
     name: Frontend (React)

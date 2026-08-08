@@ -9,20 +9,51 @@ A full-stack application combining AI image generation with social sharing.
 ├── frontend/          # React frontend (Create React App)
 │   ├── src/
 │   ├── public/
+│   ├── Dockerfile     # build with npm, serve with nginx
+│   ├── nginx.conf
 │   ├── .env.example
 │   └── package.json
 │
-├── backend/           # Go backend (App Engine flexible)
+├── backend/           # Go backend
 │   ├── handler/       # HTTP handlers, routing, auth middleware
 │   ├── service/       # business logic
 │   ├── store/         # Elasticsearch + Google Cloud Storage clients
 │   ├── media/         # upload content-type validation
 │   ├── config/        # environment-driven configuration
+│   ├── logging/       # structured logging, request ids
+│   ├── Dockerfile     # static binary, non-root, distroless-ish alpine
 │   ├── .env.example
 │   └── go.mod
 │
+├── docker-compose.yml # the whole stack, offline
 └── README.md
 ```
+
+## Running it offline
+
+The whole stack runs with no cloud account, no credentials and no billing:
+
+```bash
+docker compose up --build
+open http://localhost:3000
+```
+
+That starts the same Elasticsearch 7.17.24 the tests and the deployment use — with
+security enabled, so the credential path is exercised rather than bypassed — a
+Google Cloud Storage emulator, the API, and the frontend behind nginx.
+
+The only thing replaced by a substitute is the DALL-E call, via
+`IMAGE_PROVIDER=stub`, which renders a placeholder PNG derived from a hash of the
+prompt. That is the one step that costs money per request; everything after it is
+the production path unmodified — the same content sniffing, the same storage
+write, the same public-read ACL, the same index write. The placeholder is a real
+encoded PNG for that reason: the bytes have to survive the same validation as a
+real upload.
+
+Nothing is persisted. Both stores are deliberately throwaway *together*: the
+storage emulator holds objects in memory, so if Elasticsearch kept its indices the
+gallery would come back listing posts whose images no longer exist. `docker compose
+down` resets everything.
 
 ## Configuration
 
@@ -39,9 +70,12 @@ message if anything is missing, too short, or unsafe:
 | `ES_USERNAME`, `ES_PASSWORD` | Elasticsearch credentials |
 | `GCS_BUCKET` | Bucket for uploaded and generated media |
 | `JWT_SECRET` | HS256 signing key, minimum 32 chars (`openssl rand -base64 48`) |
-| `OPENAI_API_KEY` | Server-side only, never exposed to the browser |
+| `OPENAI_API_KEY` | Server-side only, never exposed to the browser. Required only when `IMAGE_PROVIDER=openai` |
+| `IMAGE_PROVIDER` | Optional. `openai` (default) or `stub`. A named switch, not inferred from a missing key |
 | `ALLOWED_ORIGINS` | Comma-separated frontend origins; `*` is rejected |
-| `PORT` | Optional, App Engine sets it; defaults to 8080 |
+| `PORT` | Optional; defaults to 8080 |
+| `LOG_LEVEL` | Optional. `debug`, `info` (default), `warn`, `error`. An unrecognised value is rejected |
+| `STORAGE_EMULATOR_HOST` | Optional. Points the storage client at an emulator. When set, the server also creates the bucket at startup |
 
 **Frontend** — copy `frontend/.env.example` to `frontend/.env.local`. Only
 non-secret values belong there: Create React App inlines every `REACT_APP_*`
@@ -66,25 +100,44 @@ go test ./...             # unit tests
 ```
 
 `go vet` is the floor. The linter set in `.golangci.yml` caught three sentinel
-errors compared with `==` rather than `errors.Is` — including one in the GCS
-delete path, where a wrapped `ErrObjectNotExist` would have made an
-already-deleted object look like a failure and left the post undeletable — plus
-a server started without a header-read timeout. Install it with:
+errors compared with `==` rather than `errors.Is`. One of them, in the GCS delete
+path, turned out to be a live bug rather than a latent one: the client returns
+`ErrObjectNotExist` wrapped, so the comparison was never true and deleting a post
+whose image had already gone failed every time. It also caught a server started
+without a header-read timeout. Install it with:
 
 ```bash
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 ```
 
-Integration tests run against a real Elasticsearch and skip unless `ES_TEST_URL`
-is set. They cover what compiling cannot: that the mappings are accepted, that
-the throttle script increments rather than overwrites, that an unindexed field
-genuinely cannot be filtered on, and that the reindex preserves fields.
+Integration tests run against real services and skip unless the corresponding
+variable is set. They cover what compiling cannot: that the mappings are accepted,
+that the throttle script increments rather than overwrites, that an unindexed
+field genuinely cannot be filtered on, that the reindex preserves fields, and that
+an object written to storage comes back with the bytes, the content type and the
+public-read ACL it was given.
 
 ```bash
-ES_TEST_URL=http://127.0.0.1:9200 go test -run Integration -v ./...
+# Against the compose stack, which already runs both:
+docker compose up -d elasticsearch fake-gcs
+
+cd backend
+ES_TEST_URL=http://127.0.0.1:9200 \
+ES_TEST_USERNAME=elastic ES_TEST_PASSWORD=local-dev-password \
+GCS_TEST_EMULATOR=localhost:4443 \
+  go test -run Integration -v ./...
 ```
 
-CI runs them with an Elasticsearch service container.
+Credentials are overridable because a cluster that actually checks them is the
+only way to exercise that half of the config; with `xpack.security` off, any
+username and password work.
+
+CI runs the same suite against both service containers, and a separate job builds
+the compose stack and drives a request through it end to end — signup, signin,
+generate, fetch the image URL anonymously, delete, then confirm the object is gone.
+That job exists because a compose file cannot be verified by reading it: a wrong
+image tag, a healthcheck calling a binary the image does not ship, or an emulator
+default that turns out to be load-bearing all look exactly like a working file.
 
 ### Endpoints
 
@@ -318,9 +371,16 @@ stores the result, and returns the saved post. The frontend holds no API key.
   Signing out of one browser signs out of all of them.
 - Search paging is offset-based (`from`/`size`), which degrades past roughly
   10,000 results. A `search_after` cursor would be needed beyond that.
-- The GCS write, the DALL-E call and the delete of a stored object have never run
-  against live services here: they need real credentials. Everything else is
-  covered by the unit and integration suites.
+- The DALL-E call itself has never been exercised in this repo's tests: it costs
+  money per request, so `IMAGE_PROVIDER=stub` covers the pipeline around it and the
+  call itself is checked by hand. The storage write, ACL and delete now run against
+  an emulator in CI.
+- Elasticsearch is the only datastore, including for users. It is not a relational
+  database and does not pretend to be one: uniqueness needs `op_type=create`, a
+  write is not immediately visible without `refresh=wait_for`, and there are no
+  transactions. Those constraints are worked around explicitly rather than
+  ignored, but a relational store for accounts would be the right answer at any
+  real scale.
 
 ## License
 

@@ -1,0 +1,163 @@
+# The whole stack, offline: Elasticsearch, a storage emulator, the API and the
+# frontend, with no cloud account, no credentials and no billing.
+#
+#   docker compose up --build
+#   open http://localhost:3000
+#
+# Every value in this file is a local development value. None of it is secret, and
+# none of it is reused anywhere else -- which is the point of writing them here in
+# plain sight rather than in a .env that looks like it might matter.
+#
+# What is deliberately *not* faked: Elasticsearch is the same 7.17.24 the tests and
+# the deployment use, with security switched on so the credential path is actually
+# exercised, and the storage emulator speaks the real GCS JSON API. The only thing
+# replaced by a local substitute is the DALL-E call, via IMAGE_PROVIDER=stub,
+# because that is the one step that costs money per request. Everything after it --
+# content sniffing, the storage write, the ACL, the index write -- is the
+# production path.
+
+name: neural-canvas
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.24
+    environment:
+      # single-node skips the production bootstrap checks that would otherwise
+      # refuse to start a one-node cluster.
+      - discovery.type=single-node
+      # Security on, not off. Off is one line shorter and would accept any
+      # username and password, which would leave ES_USERNAME/ES_PASSWORD as
+      # config the stack carries but never checks.
+      - xpack.security.enabled=true
+      - ELASTIC_PASSWORD=local-dev-password
+      # Without a heap cap the JVM sizes itself from the host's RAM, which on a
+      # laptop means a container that reserves several gigabytes to hold a few
+      # dozen documents.
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      # Published so the integration tests can run against this cluster from the
+      # host: ES_TEST_URL=http://127.0.0.1:9200
+      - "9200:9200"
+    healthcheck:
+      # yellow, not green. A single node cannot assign the replica shards that
+      # index creation asks for by default, so green never arrives and waiting for
+      # it would hang the stack on a cluster that is working fine.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf -u elastic:local-dev-password 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=1s' > /dev/null",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      # Elasticsearch takes a while to come up; without this the retries would be
+      # spent before it has finished starting.
+      start_period: 40s
+
+  fake-gcs:
+    image: fsouza/fake-gcs-server:1.55.1
+    command:
+      # https is the default, and the storage client talks plain http to
+      # STORAGE_EMULATOR_HOST, so without this every call fails on a TLS
+      # handshake against a server that is otherwise working.
+      - "-scheme"
+      - "http"
+      - "-port"
+      - "4443"
+      # memory, not the default filesystem backend. The filesystem backend answers
+      # object ACL updates with "500 not implemented: fs storage type does not
+      # support objects generation yet", which fails every upload -- SaveToGCS
+      # sets public-read on each object and treats a failure there as fatal,
+      # because an object that silently stayed private is a broken image with
+      # nothing logged. The memory backend implements ACLs, so the whole
+      # production write path runs here unmodified.
+      - "-backend"
+      - "memory"
+      # These two control the URLs the emulator writes into object metadata, which
+      # is what SaveToGCS stores on the post and what the browser then loads. They
+      # have to be the host's view of the emulator: the backend reaches it at
+      # fake-gcs:4443 inside this network, but that name does not resolve in a
+      # browser, so an image URL built from it would render as a broken image.
+      - "-external-url"
+      - "http://localhost:4443"
+      - "-public-host"
+      - "localhost:4443"
+    ports:
+      - "4443:4443"
+    healthcheck:
+      # The image is alpine-based, so busybox wget is available; it has no curl.
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:4443/storage/v1/b > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      ES_URL: http://elasticsearch:9200
+      ES_USERNAME: elastic
+      ES_PASSWORD: local-dev-password
+      GCS_BUCKET: neural-canvas-local
+      # Google's own variable. The storage client honours it directly, so no code
+      # here special-cases an endpoint -- and the bucket above is created at
+      # startup, but only when this is set.
+      STORAGE_EMULATOR_HOST: fake-gcs:4443
+      # No OPENAI_API_KEY is set, and none is required: config rejects a missing
+      # key only for the openai provider.
+      IMAGE_PROVIDER: stub
+      # 42 characters, over the 32-character minimum the config enforces. A real
+      # deployment generates one with `openssl rand -base64 48`.
+      JWT_SECRET: local-development-only-not-a-secret-000000
+      # The browser's origin, not the frontend container's name.
+      ALLOWED_ORIGINS: http://localhost:3000
+      # debug adds a line per rejected token, unparseable body and stored object,
+      # which is what makes the stack useful for seeing how a request failed.
+      LOG_LEVEL: debug
+    ports:
+      - "8080:8080"
+    depends_on:
+      # service_healthy, not the default. Both dependencies are contacted during
+      # startup -- Elasticsearch to create the indices, storage to create the
+      # bucket -- and startup returns an error rather than retrying, so starting
+      # before they are ready is a crash, not a delay.
+      elasticsearch:
+        condition: service_healthy
+      fake-gcs:
+        condition: service_healthy
+    healthcheck:
+      # /healthz, not /readyz. Liveness must not fail because a dependency is
+      # down: restarting this container would not fix Elasticsearch, and doing so
+      # repeatedly turns one broken dependency into a crash-looping stack.
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/healthz > /dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    # The server drains in-flight requests for up to 25 seconds on SIGTERM, so
+    # give it more than compose's default 10 before the kill.
+    stop_grace_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the bundle at build time, so this is the browser's view of
+        # the API. Changing it requires a rebuild, not a restart.
+        REACT_APP_API_BASE_URL: http://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+# No volumes, deliberately. Both data stores here are throwaway, and the useful
+# property is that they are throwaway *together*: the storage emulator holds
+# objects in memory, so if Elasticsearch kept its indices across a reset the
+# gallery would come back listing posts whose images no longer exist -- broken
+# images rather than an empty page. `docker compose down` resets the whole stack to
+# a clean state; signing up again takes a few seconds.

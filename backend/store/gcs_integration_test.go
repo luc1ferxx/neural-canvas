@@ -16,9 +16,19 @@ import (
 )
 
 // These run against a GCS emulator (fsouza/fake-gcs-server) and are skipped
-// unless GCS_TEST_EMULATOR is set:
+// unless GCS_TEST_EMULATOR is set. The emulator's defaults are wrong for this in
+// two ways that both surface as puzzling failures, so start it like this:
 //
+//	fake-gcs-server -scheme http -port 4443 -backend memory \
+//	  -public-host localhost:4443 -external-url http://localhost:4443
 //	GCS_TEST_EMULATOR=localhost:4443 go test -run Integration ./store/...
+//
+// -scheme http because the default is https and the storage client talks plain
+// http to STORAGE_EMULATOR_HOST. -backend memory because the default filesystem
+// backend rejects object ACL updates with "500 not implemented", which fails every
+// upload. -public-host because the client builds object read URLs against it, so
+// with the default a download 404s on an object whose metadata the same client
+// just read successfully. Or use `docker compose up`, which passes all of them.
 //
 // They exist because the storage write and delete were the only paths in this
 // project that had never been executed against anything at all -- not a unit

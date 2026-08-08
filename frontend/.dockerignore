@@ -1,0 +1,14 @@
+# node_modules is rebuilt inside the image by npm ci. Copying the host's copy in
+# would be slower and could carry binaries built for the host's platform.
+node_modules
+
+# Stale local build output, which would otherwise be copied in and then
+# overwritten.
+build
+
+.env
+.env.*
+!.env.example
+
+.git
+*.md
