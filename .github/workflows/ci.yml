@@ -19,15 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: socialai
+        working-directory: backend
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          # Matches the go directive in socialai/go.mod.
-          go-version-file: socialai/go.mod
-          cache-dependency-path: socialai/go.sum
+          # Matches the go directive in backend/go.mod.
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
 
       - name: Verify go.mod is tidy
         run: |
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: socialai
+        working-directory: backend
 
     # These tests cover what compiling cannot: that the mappings are accepted,
     # that the Painless throttle script increments rather than overwrites, that
@@ -84,8 +84,8 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: socialai/go.mod
-          cache-dependency-path: socialai/go.sum
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
 
       - name: Wait for Elasticsearch
         run: |
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: social-ai
+        working-directory: frontend
     steps:
       - uses: actions/checkout@v4
 
@@ -117,7 +117,7 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: social-ai/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci

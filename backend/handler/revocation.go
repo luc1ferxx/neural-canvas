@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"socialai/service"
+	"github.com/luc1ferxx/neural-canvas/backend/service"
 
 	jwt "github.com/form3tech-oss/jwt-go"
 )

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"socialai/backend"
-	"socialai/constants"
-	"socialai/model"
+	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/model"
+	"github.com/luc1ferxx/neural-canvas/backend/store"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -25,7 +25,7 @@ var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17
 // account can log in immediately instead of waiting for the next refresh.
 func getUser(username string) (*model.User, bool, error) {
 	var user model.User
-	found, err := backend.ESBackend.GetDocument(constants.USER_INDEX, username, &user)
+	found, err := store.ESBackend.GetDocument(constants.USER_INDEX, username, &user)
 	if err != nil {
 		return nil, false, err
 	}
@@ -90,7 +90,7 @@ func AddUser(user *model.User) error {
 	toStore := *user
 	toStore.Password = string(hashed)
 
-	if err := backend.ESBackend.SaveToES(&toStore, constants.USER_INDEX, toStore.Username); err != nil {
+	if err := store.ESBackend.SaveToES(&toStore, constants.USER_INDEX, toStore.Username); err != nil {
 		return err
 	}
 
@@ -130,6 +130,6 @@ func RevokeTokens(username string) error {
 	// this same second is also refused, rather than surviving on a tie.
 	cutoff := time.Now().Unix() + 1
 
-	return backend.ESBackend.UpdateFields(constants.USER_INDEX, username,
+	return store.ESBackend.UpdateFields(constants.USER_INDEX, username,
 		map[string]interface{}{"tokensValidAfter": cutoff})
 }

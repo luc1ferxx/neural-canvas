@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"socialai/backend"
-	"socialai/config"
-	"socialai/constants"
-	"socialai/model"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/model"
+	"github.com/luc1ferxx/neural-canvas/backend/store"
 )
 
 // These tests run against a real Elasticsearch. They are skipped unless
@@ -55,7 +55,7 @@ func setupIntegration(t *testing.T) {
 	if err := config.Load(); err != nil {
 		t.Fatalf("config.Load(): %v", err)
 	}
-	if err := backend.InitElasticsearchBackend(); err != nil {
+	if err := store.InitElasticsearchBackend(); err != nil {
 		t.Fatalf("InitElasticsearchBackend(): %v", err)
 	}
 }
@@ -75,7 +75,7 @@ func TestIntegrationMappingsAreAccepted(t *testing.T) {
 		constants.POST_INDEX,
 		constants.LOGIN_ATTEMPT_INDEX,
 	} {
-		exists, err := backend.ESBackend.IndexExists(index)
+		exists, err := store.ESBackend.IndexExists(index)
 		if err != nil {
 			t.Fatalf("IndexExists(%q): %v", index, err)
 		}
@@ -206,7 +206,7 @@ func TestIntegrationThrottleIncrementsAtomically(t *testing.T) {
 	}
 
 	var attempt loginAttempt
-	found, err := backend.ESBackend.GetDocument(
+	found, err := store.ESBackend.GetDocument(
 		constants.LOGIN_ATTEMPT_INDEX, username, &attempt)
 	if err != nil || !found {
 		t.Fatalf("GetDocument(): found=%v err=%v", found, err)
@@ -274,7 +274,7 @@ func TestIntegrationRevokingUnknownUserIsHarmless(t *testing.T) {
 // indexPost writes a post directly, bypassing SavePost so the test needs no GCS.
 func indexPost(t *testing.T, index string, p model.Post) {
 	t.Helper()
-	if err := backend.ESBackend.SaveToES(&p, index, p.Id); err != nil {
+	if err := store.ESBackend.SaveToES(&p, index, p.Id); err != nil {
 		t.Fatalf("SaveToES(): %v", err)
 	}
 }
@@ -372,11 +372,11 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 	setupIntegration(t)
 
 	legacy := uniqueName("legacy_post_")
-	if err := backend.ESBackend.EnsureIndex(legacy, legacyPostMapping); err != nil {
+	if err := store.ESBackend.EnsureIndex(legacy, legacyPostMapping); err != nil {
 		t.Fatalf("create legacy index: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = backend.ESBackend.DeleteIndex(legacy)
+		_ = store.ESBackend.DeleteIndex(legacy)
 	})
 
 	author := uniqueName("legacyauthor")
@@ -386,7 +386,7 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 	})
 
 	// Confirm the document is there when not filtering by type.
-	all, err := backend.ESBackend.ReadFromESPaged(
+	all, err := store.ESBackend.ReadFromESPaged(
 		buildPostQuery(PostQuery{User: author}), legacy, 0, 50)
 	if err != nil {
 		t.Fatalf("read legacy index: %v", err)
@@ -402,8 +402,8 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 	// That is why the migration uses a new index name rather than trying to
 	// filter the old one. It also means a deployment that pointed at the legacy
 	// index would fail every search, not degrade quietly -- see the startup
-	// warning in backend.InitElasticsearchBackend.
-	filtered, err := backend.ESBackend.ReadFromESPaged(
+	// warning in store.InitElasticsearchBackend.
+	filtered, err := store.ESBackend.ReadFromESPaged(
 		buildPostQuery(PostQuery{User: author, Type: "image"}), legacy, 0, 50)
 	if err == nil && filtered.TotalHits() > 0 {
 		t.Errorf("the legacy mapping unexpectedly served a type filter (%d hits); "+
@@ -415,14 +415,14 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 
 	// Now migrate and confirm the same filter works.
 	target := uniqueName("migrated_post_")
-	if err := backend.ESBackend.EnsureIndex(target, backend.PostMapping()); err != nil {
+	if err := store.ESBackend.EnsureIndex(target, store.PostMapping()); err != nil {
 		t.Fatalf("create target index: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = backend.ESBackend.DeleteIndex(target)
+		_ = store.ESBackend.DeleteIndex(target)
 	})
 
-	copied, err := backend.ESBackend.Reindex(legacy, target)
+	copied, err := store.ESBackend.Reindex(legacy, target)
 	if err != nil {
 		t.Fatalf("Reindex(): %v", err)
 	}
@@ -430,7 +430,7 @@ func TestIntegrationLegacyMappingCannotFilterByType(t *testing.T) {
 		t.Errorf("Reindex copied %d documents, want 1", copied)
 	}
 
-	migrated, err := backend.ESBackend.ReadFromESPaged(
+	migrated, err := store.ESBackend.ReadFromESPaged(
 		buildPostQuery(PostQuery{User: author, Type: "image"}), target, 0, 50)
 	if err != nil {
 		t.Fatalf("read migrated index: %v", err)

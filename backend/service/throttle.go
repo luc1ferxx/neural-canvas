@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"socialai/backend"
-	"socialai/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/store"
 )
 
 const (
@@ -51,7 +51,7 @@ if (ctx._source.firstAttempt == null ||
 // limiter.
 func LoginAllowed(username string) (bool, error) {
 	var attempt loginAttempt
-	found, err := backend.ESBackend.GetDocument(
+	found, err := store.ESBackend.GetDocument(
 		constants.LOGIN_ATTEMPT_INDEX, username, &attempt)
 	if err != nil {
 		return false, err
@@ -72,7 +72,7 @@ func LoginAllowed(username string) (bool, error) {
 func RecordLoginFailure(username string) error {
 	now := time.Now().Unix()
 
-	return backend.ESBackend.UpdateWithScript(
+	return store.ESBackend.UpdateWithScript(
 		constants.LOGIN_ATTEMPT_INDEX,
 		username,
 		incrementScript,
@@ -90,7 +90,7 @@ func RecordLoginFailure(username string) error {
 
 // ClearLoginFailures resets the counter after a successful sign-in.
 func ClearLoginFailures(username string) error {
-	if err := backend.ESBackend.DeleteDocument(
+	if err := store.ESBackend.DeleteDocument(
 		constants.LOGIN_ATTEMPT_INDEX, username); err != nil {
 		return fmt.Errorf("clear login failures for %q: %w", username, err)
 	}

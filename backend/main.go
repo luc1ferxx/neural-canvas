@@ -5,9 +5,9 @@ import (
 	"log"
 	"net/http"
 
-	"socialai/backend"
-	"socialai/config"
-	"socialai/handler"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/handler"
+	"github.com/luc1ferxx/neural-canvas/backend/store"
 )
 
 func main() {
@@ -19,10 +19,10 @@ func main() {
 		log.Fatalf("configuration error: %v", err)
 	}
 
-	if err := backend.InitElasticsearchBackend(); err != nil {
+	if err := store.InitElasticsearchBackend(); err != nil {
 		log.Fatalf("elasticsearch: %v", err)
 	}
-	if err := backend.InitGCSBackend(); err != nil {
+	if err := store.InitGCSBackend(); err != nil {
 		log.Fatalf("google cloud storage: %v", err)
 	}
 

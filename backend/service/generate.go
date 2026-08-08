@@ -9,12 +9,12 @@ import (
 	"net/http"
 	"time"
 
-	"socialai/config"
-	"socialai/constants"
-	"socialai/media"
-	"socialai/model"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/media"
+	"github.com/luc1ferxx/neural-canvas/backend/model"
 
-	"socialai/backend"
+	"github.com/luc1ferxx/neural-canvas/backend/store"
 
 	"github.com/pborman/uuid"
 )
@@ -81,13 +81,13 @@ func GenerateAndSavePost(ctx context.Context, username, prompt string) (*model.P
 		Type:    postType,
 	}
 
-	url, err := backend.GCSBackend.SaveToGCS(body, post.Id, mime)
+	url, err := store.GCSBackend.SaveToGCS(body, post.Id, mime)
 	if err != nil {
 		return nil, fmt.Errorf("save generated image: %w", err)
 	}
 	post.Url = url
 
-	if err := backend.ESBackend.SaveToES(post, constants.POST_INDEX, post.Id); err != nil {
+	if err := store.ESBackend.SaveToES(post, constants.POST_INDEX, post.Id); err != nil {
 		return nil, fmt.Errorf("index generated post: %w", err)
 	}
 

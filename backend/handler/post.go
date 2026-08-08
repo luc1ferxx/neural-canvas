@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"socialai/media"
-	"socialai/model"
-	"socialai/service"
+	"github.com/luc1ferxx/neural-canvas/backend/media"
+	"github.com/luc1ferxx/neural-canvas/backend/model"
+	"github.com/luc1ferxx/neural-canvas/backend/service"
 
 	"github.com/gorilla/mux"
 	"github.com/pborman/uuid"

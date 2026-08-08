@@ -1,4 +1,4 @@
-package backend
+package store
 
 import (
 	"context"
@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
-	"socialai/config"
-	"socialai/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/constants"
 
 	"github.com/olivere/elastic/v7"
 )

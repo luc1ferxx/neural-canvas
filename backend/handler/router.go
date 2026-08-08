@@ -6,7 +6,7 @@ import (
 	jwtMiddleware "github.com/auth0/go-jwt-middleware"
 	jwt "github.com/form3tech-oss/jwt-go"
 
-	"socialai/config"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"

@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"strings"
 
-	"socialai/service"
+	"github.com/luc1ferxx/neural-canvas/backend/service"
 )
 
 const (

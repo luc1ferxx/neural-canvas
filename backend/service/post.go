@@ -5,9 +5,9 @@ import (
 	"io"
 	"reflect"
 
-	"socialai/backend"
-	"socialai/constants"
-	"socialai/model"
+	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/model"
+	"github.com/luc1ferxx/neural-canvas/backend/store"
 
 	"github.com/olivere/elastic/v7"
 )
@@ -65,7 +65,7 @@ func buildPostQuery(q PostQuery) elastic.Query {
 // to fetch one page and split it into tabs client side, so a tab could report
 // "No images!" while images existed further down the result set.
 func SearchPosts(q PostQuery) ([]model.Post, error) {
-	searchResult, err := backend.ESBackend.ReadFromESPaged(
+	searchResult, err := store.ESBackend.ReadFromESPaged(
 		buildPostQuery(q), constants.POST_INDEX, q.From, q.Size)
 	if err != nil {
 		return nil, err
@@ -91,13 +91,13 @@ func getPostFromSearchResult(searchResult *elastic.SearchResult) []model.Post {
 // contentType must already have been validated against the media allowlist; it
 // is applied to the stored object so GCS does not sniff a type at serve time.
 func SavePost(post *model.Post, file io.Reader, contentType string) error {
-	medialink, err := backend.GCSBackend.SaveToGCS(file, post.Id, contentType)
+	medialink, err := store.GCSBackend.SaveToGCS(file, post.Id, contentType)
 	if err != nil {
 		return err
 	}
 	post.Url = medialink
 
-	return backend.ESBackend.SaveToES(post, constants.POST_INDEX, post.Id)
+	return store.ESBackend.SaveToES(post, constants.POST_INDEX, post.Id)
 }
 
 // DeletePost removes a post and its stored media, but only if it belongs to
@@ -115,7 +115,7 @@ func DeletePost(id string, user string) error {
 	// Confirm ownership first: DeleteByQuery on its own reports success even
 	// when it matched nothing, which would tell the user their delete worked
 	// when it had not.
-	searchResult, err := backend.ESBackend.ReadFromES(query, constants.POST_INDEX)
+	searchResult, err := store.ESBackend.ReadFromES(query, constants.POST_INDEX)
 	if err != nil {
 		return err
 	}
@@ -123,11 +123,11 @@ func DeletePost(id string, user string) error {
 		return ErrPostNotFound
 	}
 
-	if err := backend.GCSBackend.DeleteFromGCS(id); err != nil {
+	if err := store.GCSBackend.DeleteFromGCS(id); err != nil {
 		return err
 	}
 
-	deleted, err := backend.ESBackend.DeleteFromES(query, constants.POST_INDEX)
+	deleted, err := store.ESBackend.DeleteFromES(query, constants.POST_INDEX)
 	if err != nil {
 		return err
 	}

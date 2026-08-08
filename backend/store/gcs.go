@@ -1,11 +1,11 @@
-package backend
+package store
 
 import (
 	"context"
 	"fmt"
 	"io"
 
-	"socialai/config"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
 
 	"cloud.google.com/go/storage"
 )

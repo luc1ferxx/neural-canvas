@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"log"
 
-	"socialai/backend"
-	"socialai/config"
-	"socialai/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/store"
 )
 
 func main() {
@@ -34,11 +34,11 @@ func main() {
 	if err := config.Load(); err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
-	if err := backend.InitElasticsearchBackend(); err != nil {
+	if err := store.InitElasticsearchBackend(); err != nil {
 		log.Fatalf("elasticsearch: %v", err)
 	}
 
-	es := backend.ESBackend
+	es := store.ESBackend
 	src := constants.POST_INDEX_LEGACY
 	dst := constants.POST_INDEX
 

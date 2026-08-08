@@ -6,16 +6,16 @@ A full-stack application combining AI image generation with social sharing.
 
 ```
 .
-├── social-ai/         # React frontend (Create React App)
+├── frontend/          # React frontend (Create React App)
 │   ├── src/
 │   ├── public/
 │   ├── .env.example
 │   └── package.json
 │
-├── socialai/          # Go backend (App Engine flexible)
+├── backend/           # Go backend (App Engine flexible)
 │   ├── handler/       # HTTP handlers, routing, auth middleware
 │   ├── service/       # business logic
-│   ├── backend/       # Elasticsearch + Google Cloud Storage clients
+│   ├── store/         # Elasticsearch + Google Cloud Storage clients
 │   ├── media/         # upload content-type validation
 │   ├── config/        # environment-driven configuration
 │   ├── .env.example
@@ -29,7 +29,7 @@ A full-stack application combining AI image generation with social sharing.
 No credentials live in source. Both halves read configuration from the
 environment and ship a `.env.example` listing what is required.
 
-**Backend** — copy `socialai/.env.example` to `socialai/.env` and fill it in.
+**Backend** — copy `backend/.env.example` to `backend/.env` and fill it in.
 The server validates everything at startup and exits with a single explanatory
 message if anything is missing, too short, or unsafe:
 
@@ -43,16 +43,16 @@ message if anything is missing, too short, or unsafe:
 | `ALLOWED_ORIGINS` | Comma-separated frontend origins; `*` is rejected |
 | `PORT` | Optional, App Engine sets it; defaults to 8080 |
 
-**Frontend** — copy `social-ai/.env.example` to `social-ai/.env.local`. Only
+**Frontend** — copy `frontend/.env.example` to `frontend/.env.local`. Only
 non-secret values belong there: Create React App inlines every `REACT_APP_*`
 variable into the production bundle, where anyone can read it.
 
-## Backend (socialai)
+## Backend
 
 Go 1.25+. Elasticsearch for users and posts, Google Cloud Storage for media.
 
 ```bash
-cd socialai
+cd backend
 cp .env.example .env      # then edit
 set -a && . ./.env && set +a
 go run .
@@ -138,7 +138,7 @@ required a new index.
 After deploying, copy the old documents across:
 
 ```bash
-cd socialai
+cd backend
 set -a && . ./.env && set +a
 go run ./cmd/reindex
 ```
@@ -154,10 +154,10 @@ Delete the legacy index once you are satisfied:
 curl -XDELETE "$ES_URL/post" -u "$ES_USERNAME:$ES_PASSWORD"
 ```
 
-## Frontend (social-ai)
+## Frontend
 
 ```bash
-cd social-ai
+cd frontend
 npm install
 cp .env.example .env.local   # then edit
 npm start

@@ -9,9 +9,9 @@ import (
 	"regexp"
 	"time"
 
-	"socialai/config"
-	"socialai/model"
-	"socialai/service"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/model"
+	"github.com/luc1ferxx/neural-canvas/backend/service"
 
 	"github.com/form3tech-oss/jwt-go"
 )

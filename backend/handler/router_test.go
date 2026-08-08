@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"socialai/config"
+	"github.com/luc1ferxx/neural-canvas/backend/config"
 )
 
 // newTestRouter builds the real router with a valid throwaway configuration.

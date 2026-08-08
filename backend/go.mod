@@ -1,4 +1,4 @@
-module socialai
+module github.com/luc1ferxx/neural-canvas/backend
 
 go 1.25.3
 
