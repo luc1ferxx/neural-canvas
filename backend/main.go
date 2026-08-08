@@ -97,18 +97,25 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	// Stop trapping the signal as soon as the first one arrives, so an impatient
-	// second Ctrl-C kills the process instead of being swallowed while requests
-	// drain.
-	go func() {
-		<-ctx.Done()
+	// onSignal runs inside serve, on the shutdown path, rather than in a goroutine
+	// racing it.
+	//
+	// It was a goroutine waiting on ctx.Done(). That is a race, and an end-to-end
+	// run caught it: both the goroutine and serve wake on the same cancellation, so
+	// when Shutdown finished quickly -- which it does whenever nothing is in flight
+	// -- main returned and the process exited before the goroutine was ever
+	// scheduled. The line was silently missing from the log exactly when shutdown
+	// went well. Passing it in makes the ordering explicit.
+	onSignal := func() {
+		// Stop trapping the signal, so an impatient second Ctrl-C kills the process
+		// instead of being swallowed while requests drain.
 		stop()
 		slog.Info("signal received, draining",
 			slog.String("grace", shutdownTimeout.String()))
-	}()
+	}
 
 	slog.Info("listening", slog.String("addr", ln.Addr().String()))
-	if err := serve(ctx, srv, ln, shutdownTimeout); err != nil {
+	if err := serve(ctx, srv, ln, shutdownTimeout, onSignal); err != nil {
 		slog.Error("serve failed", slog.String("cause", err.Error()))
 		os.Exit(1)
 	}
@@ -118,12 +125,23 @@ func main() {
 // serve runs srv on ln until ctx is cancelled, then stops accepting new
 // connections and gives in-flight handlers up to grace to finish.
 //
+// onSignal, if non-nil, is called once when cancellation is observed and before
+// the drain begins. It exists so the caller can log and adjust signal handling at
+// a defined point in the sequence rather than from a goroutine that may not be
+// scheduled before the process exits.
+//
 // This is separated from main so it can be tested. Draining is the kind of
 // behaviour that is easy to write plausibly and get wrong -- forgetting that
 // ErrServerClosed is the success path, or calling Shutdown with the context that
 // was just cancelled, so the grace period is already expired when it starts --
 // and neither mistake shows up in a compile or a manual smoke test.
-func serve(ctx context.Context, srv *http.Server, ln net.Listener, grace time.Duration) error {
+func serve(
+	ctx context.Context,
+	srv *http.Server,
+	ln net.Listener,
+	grace time.Duration,
+	onSignal func(),
+) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		// ErrServerClosed is not a failure; it is what Shutdown causes, by design.
@@ -138,6 +156,10 @@ func serve(ctx context.Context, srv *http.Server, ln net.Listener, grace time.Du
 	case err := <-serveErr:
 		return err
 	case <-ctx.Done():
+		if onSignal != nil {
+			onSignal()
+		}
+
 		// A fresh context, not a derivative of ctx: ctx is already cancelled, and
 		// deriving from it would give Shutdown an expired deadline and turn the
 		// graceful drain into an immediate close.

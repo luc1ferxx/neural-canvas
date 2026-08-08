@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,7 +47,7 @@ func TestServeDrainsInFlightRequest(t *testing.T) {
 	defer cancel()
 
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx, srv, ln, 5*time.Second) }()
+	go func() { served <- serve(ctx, srv, ln, 5*time.Second, nil) }()
 
 	type result struct {
 		body string
@@ -108,7 +109,7 @@ func TestServeRefusesNewRequestsAfterSignal(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx, srv, ln, 5*time.Second) }()
+	go func() { served <- serve(ctx, srv, ln, 5*time.Second, nil) }()
 
 	// Confirm it is actually serving first, otherwise the assertion below would
 	// pass just as well against a server that never started.
@@ -152,7 +153,7 @@ func TestServeReportsAnUndrainableRequest(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx, srv, ln, 100*time.Millisecond) }()
+	go func() { served <- serve(ctx, srv, ln, 100*time.Millisecond, nil) }()
 
 	go func() {
 		resp, err := http.Get("http://" + addr + "/")
@@ -202,7 +203,7 @@ func TestServeTreatsAnExternalCloseAsClean(t *testing.T) {
 	defer cancel()
 
 	served := make(chan error, 1)
-	go func() { served <- serve(ctx, srv, ln, 5*time.Second) }()
+	go func() { served <- serve(ctx, srv, ln, 5*time.Second, nil) }()
 
 	// Give Serve a moment to be running before closing it.
 	time.Sleep(50 * time.Millisecond)
@@ -233,8 +234,97 @@ func TestServeReportsAListenerFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	err := serve(ctx, srv, ln, time.Second)
+	err := serve(ctx, srv, ln, time.Second, nil)
 	if err == nil {
 		t.Error("serve() = nil, want an error: serving on a closed listener is a failure")
+	}
+}
+
+// TestServeCallsOnSignalBeforeDraining pins the ordering that a goroutine could
+// not guarantee.
+//
+// This was a goroutine waiting on ctx.Done() alongside serve. Both woke on the
+// same cancellation, so when Shutdown completed quickly -- which it does whenever
+// nothing is in flight -- main returned and the process exited before the
+// goroutine ran. An end-to-end run against a real Elasticsearch found it: the
+// "signal received" line was missing from the log precisely when shutdown went
+// well, which is the worst case for noticing.
+func TestServeCallsOnSignalBeforeDraining(t *testing.T) {
+	ln := listenLocal(t)
+
+	srv := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	var mu sync.Mutex
+	calls := 0
+	onSignal := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, srv, ln, 5*time.Second, onSignal) }()
+
+	// Let Serve get going, then signal.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	if err := <-served; err != nil {
+		t.Fatalf("serve() = %v, want nil", err)
+	}
+
+	// By the time serve has returned, onSignal must already have run -- not "may
+	// eventually run on another goroutine".
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Errorf("onSignal called %d times, want exactly 1", calls)
+	}
+}
+
+// TestServeToleratesNoOnSignal keeps the hook optional.
+func TestServeToleratesNoOnSignal(t *testing.T) {
+	ln := listenLocal(t)
+	srv := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, srv, ln, 5*time.Second, nil) }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	if err := <-served; err != nil {
+		t.Errorf("serve() with a nil hook = %v, want nil", err)
+	}
+}
+
+// TestServeDoesNotCallOnSignalOnAListenerFailure checks the hook is tied to
+// cancellation, not to any exit: a crash is not a signal.
+func TestServeDoesNotCallOnSignalOnAListenerFailure(t *testing.T) {
+	ln := listenLocal(t)
+	_ = ln.Close()
+
+	srv := &http.Server{
+		Handler:           http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	called := false
+	if err := serve(ctx, srv, ln, time.Second, func() { called = true }); err == nil {
+		t.Error("serve() = nil, want an error")
+	}
+	if called {
+		t.Error("onSignal ran on a listener failure; it must only run on cancellation")
 	}
 }
