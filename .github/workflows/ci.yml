@@ -251,6 +251,44 @@ jobs:
           code=$(status /dev/null "$url")
           [ "$code" = "404" ] || { echo "::error::deleted image is still fetchable ($code)"; exit 1; }
 
+          echo "--- metrics are served, and reflect the work just done"
+          code=$(status /tmp/metrics.txt http://localhost:9090/metrics)
+          [ "$code" = "200" ] || { echo "::error::metrics endpoint returned $code"; exit 1; }
+
+          for m in http_requests_total http_request_duration_seconds \
+                   http_requests_in_flight image_generations_total \
+                   generation_quota_rejections_total \
+                   elasticsearch_operation_duration_seconds go_goroutines; do
+            grep -q "^# TYPE $m " /tmp/metrics.txt \
+              || { echo "::error::$m is missing from /metrics"; exit 1; }
+          done
+
+          # Presence of the metric names only proves they were declared. These two
+          # prove the recording is actually wired into the running binary, which a
+          # unit test cannot show: the counters have to have moved for the generate
+          # and the Elasticsearch writes that happened above.
+          #
+          # [{] rather than \{ because an unescaped brace is a repetition operator
+          # in awk's regex dialect.
+          gen=$(awk '/^image_generations_total[{]provider="stub",result="success"[}]/ {print $2}' /tmp/metrics.txt)
+          awk -v v="${gen:-0}" 'BEGIN { exit !(v > 0) }' \
+            || { echo "::error::image_generations_total{provider=stub,result=success} is ${gen:-missing} after a successful generate"; exit 1; }
+          echo "    stub generations counted: $gen"
+
+          es=$(awk '/^elasticsearch_operation_duration_seconds_count[{]/ {s+=$2} END {print s+0}' /tmp/metrics.txt)
+          awk -v v="$es" 'BEGIN { exit !(v > 0) }' \
+            || { echo "::error::no Elasticsearch operation was timed, but signup, signin, generate and delete all write to it"; exit 1; }
+          echo "    elasticsearch operations timed: $es"
+
+          # The reason /metrics is on its own listener at all. It publishes route
+          # names, traffic volume, error rates, Go runtime internals and the process
+          # command line, so reaching it from the public port would be a disclosure
+          # bug -- and one that a code change could reintroduce silently, since
+          # everything would still work.
+          echo "--- metrics are not reachable on the API port"
+          code=$(status /dev/null http://localhost:8080/metrics)
+          [ "$code" = "404" ] || { echo "::error::/metrics answered $code on the public API port"; exit 1; }
+
           echo "--- the whole offline path works"
 
       - name: Stack logs

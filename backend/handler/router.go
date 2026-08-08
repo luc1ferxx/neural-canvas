@@ -45,6 +45,11 @@ func InitRouter() http.Handler {
 
 	router := mux.NewRouter()
 
+	// mux's defaults for these send text/plain, which would leave 404 and 405 as
+	// the only responses in the API a JSON client cannot parse.
+	router.NotFoundHandler = http.HandlerFunc(notFoundHandler)
+	router.MethodNotAllowedHandler = http.HandlerFunc(methodNotAllowedHandler)
+
 	// Probes are unauthenticated and outside the JWT middleware: a load balancer
 	// has no token, and requiring one would make every instance permanently
 	// unready.
@@ -72,13 +77,20 @@ func InitRouter() http.Handler {
 
 	// Ordering, outermost first:
 	//
+	//   instrument    outside everything, so the metrics count every request that
+	//                 reached the process -- including the ones that match no route,
+	//                 which mux middleware never sees, and the ones CORS rejects
+	//                 before the router is consulted. A spike in either is
+	//                 something worth being able to see.
 	//   CORS          rejects a disallowed origin before any work is done
 	//   withRequestID every entry below this point carries the id, including the
 	//                 access log and any panic
 	//   accessLog     outside recoverPanic, so a panic is still recorded as the
 	//                 500 the client actually received
 	//   recoverPanic  closest to the handlers, which are what can panic
-	return handlers.CORS(originsOk, headersOk, methodsOk, exposedOk)(
-		withRequestID(accessLog(recoverPanic(router))),
+	return instrument(router)(
+		handlers.CORS(originsOk, headersOk, methodsOk, exposedOk)(
+			withRequestID(accessLog(recoverPanic(router))),
+		),
 	)
 }

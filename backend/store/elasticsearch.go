@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/luc1ferxx/neural-canvas/backend/config"
 	"github.com/luc1ferxx/neural-canvas/backend/constants"
+	"github.com/luc1ferxx/neural-canvas/backend/metrics"
 
 	"github.com/olivere/elastic/v7"
 )
@@ -107,6 +109,7 @@ func InitElasticsearchBackend(ctx context.Context) error {
 // Ping reports whether the cluster answers. The readiness probe needs this to
 // distinguish "this process is alive" from "this process can serve traffic".
 func (backend *ElasticsearchBackend) Ping(ctx context.Context) error {
+	defer metrics.ObserveElasticsearch(metrics.OpPing, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
 	defer cancel()
 
@@ -180,6 +183,7 @@ func PostMapping() string { return postMapping }
 
 // IndexExists reports whether an index is present.
 func (backend *ElasticsearchBackend) IndexExists(ctx context.Context, index string) (bool, error) {
+	defer metrics.ObserveElasticsearch(metrics.OpIndexExists, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esAdminTimeout)
 	defer cancel()
 
@@ -188,6 +192,7 @@ func (backend *ElasticsearchBackend) IndexExists(ctx context.Context, index stri
 
 // CountDocuments returns the number of documents in an index.
 func (backend *ElasticsearchBackend) CountDocuments(ctx context.Context, index string) (int64, error) {
+	defer metrics.ObserveElasticsearch(metrics.OpCount, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
 	defer cancel()
 
@@ -196,11 +201,13 @@ func (backend *ElasticsearchBackend) CountDocuments(ctx context.Context, index s
 
 // EnsureIndex creates an index with the given mapping if it does not exist.
 func (backend *ElasticsearchBackend) EnsureIndex(ctx context.Context, index, mapping string) error {
+	defer metrics.ObserveElasticsearch(metrics.OpEnsureIndex, time.Now())
 	return ensureIndex(ctx, backend.client, index, mapping)
 }
 
 // DeleteIndex removes an index entirely. Used by tests to clean up.
 func (backend *ElasticsearchBackend) DeleteIndex(ctx context.Context, index string) error {
+	defer metrics.ObserveElasticsearch(metrics.OpDeleteIndex, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esAdminTimeout)
 	defer cancel()
 
@@ -222,6 +229,7 @@ func (backend *ElasticsearchBackend) DeleteIndex(ctx context.Context, index stri
 // reindex takes is a function of how much data there is, so only the caller can
 // pick a sensible bound. cmd/reindex sets one.
 func (backend *ElasticsearchBackend) Reindex(ctx context.Context, src, dst string) (int64, error) {
+	defer metrics.ObserveElasticsearch(metrics.OpReindex, time.Now())
 	resp, err := backend.client.Reindex().
 		SourceIndex(src).
 		DestinationIndex(dst).
@@ -241,6 +249,7 @@ func (backend *ElasticsearchBackend) Reindex(ctx context.Context, src, dst strin
 // username or checking ownership of one post. For anything list-shaped use
 // ReadFromESPaged: the default was silently capping search results at 10.
 func (backend *ElasticsearchBackend) ReadFromES(ctx context.Context, query elastic.Query, index string) (*elastic.SearchResult, error) {
+	defer metrics.ObserveElasticsearch(metrics.OpSearch, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
 	defer cancel()
 
@@ -259,6 +268,7 @@ func (backend *ElasticsearchBackend) ReadFromES(ctx context.Context, query elast
 // ReadFromESPaged runs query with an explicit window. Callers must pass a size;
 // leaving it unset is what limited every search to 10 results.
 func (backend *ElasticsearchBackend) ReadFromESPaged(ctx context.Context, query elastic.Query, index string, from, size int) (*elastic.SearchResult, error) {
+	defer metrics.ObserveElasticsearch(metrics.OpSearchPaged, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
 	defer cancel()
 
@@ -283,6 +293,7 @@ func (backend *ElasticsearchBackend) ReadFromESPaged(ctx context.Context, query 
 // Refresh("true") makes the deletion visible to the next search. Unlike the
 // single-document delete API, _delete_by_query does not accept "wait_for".
 func (backend *ElasticsearchBackend) DeleteFromES(ctx context.Context, query elastic.Query, index string) (int64, error) {
+	defer metrics.ObserveElasticsearch(metrics.OpDeleteByQuery, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
 	defer cancel()
 
@@ -310,6 +321,7 @@ func (backend *ElasticsearchBackend) DeleteFromES(ctx context.Context, query ela
 // is what makes it the right primitive for authentication and for session
 // revocation checks.
 func (backend *ElasticsearchBackend) GetDocument(ctx context.Context, index, id string, out interface{}) (bool, error) {
+	defer metrics.ObserveElasticsearch(metrics.OpGetDocument, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esReadTimeout)
 	defer cancel()
 
@@ -337,6 +349,7 @@ func (backend *ElasticsearchBackend) GetDocument(ctx context.Context, index, id 
 // untouched. Used so revoking a session does not have to rewrite the password
 // hash.
 func (backend *ElasticsearchBackend) UpdateFields(ctx context.Context, index, id string, fields map[string]interface{}) error {
+	defer metrics.ObserveElasticsearch(metrics.OpUpdateFields, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
 	defer cancel()
 
@@ -363,6 +376,7 @@ func (backend *ElasticsearchBackend) UpdateWithScript(
 	params map[string]interface{},
 	upsert map[string]interface{},
 ) error {
+	defer metrics.ObserveElasticsearch(metrics.OpUpdateWithScript, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
 	defer cancel()
 
@@ -381,6 +395,7 @@ func (backend *ElasticsearchBackend) UpdateWithScript(
 
 // DeleteDocument removes one document by id. A missing document is not an error.
 func (backend *ElasticsearchBackend) DeleteDocument(ctx context.Context, index, id string) error {
+	defer metrics.ObserveElasticsearch(metrics.OpDeleteDocument, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
 	defer cancel()
 
@@ -415,6 +430,7 @@ var ErrConflict = errors.New("document already exists")
 // value that must be unique and refusing to create over it is the closest
 // equivalent, and unlike the read-then-write it has no window.
 func (backend *ElasticsearchBackend) CreateDocument(ctx context.Context, i interface{}, index string, id string) error {
+	defer metrics.ObserveElasticsearch(metrics.OpCreateDocument, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
 	defer cancel()
 
@@ -447,6 +463,7 @@ func (backend *ElasticsearchBackend) CreateDocument(ctx context.Context, i inter
 // preferable to a fixed client-side delay that is simultaneously too slow in the
 // common case and still a race in the worst one.
 func (backend *ElasticsearchBackend) SaveToES(ctx context.Context, i interface{}, index string, id string) error {
+	defer metrics.ObserveElasticsearch(metrics.OpIndexDocument, time.Now())
 	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
 	defer cancel()
 

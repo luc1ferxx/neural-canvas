@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/luc1ferxx/neural-canvas/backend/logging"
+	"github.com/luc1ferxx/neural-canvas/backend/metrics"
 	"github.com/luc1ferxx/neural-canvas/backend/service"
 )
 
@@ -59,6 +60,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	// unmetered endpoint lets one account drain the balance for everyone.
 	if err := service.ReserveGeneration(r.Context(), username); err != nil {
 		if errors.Is(err, service.ErrQuotaExceeded) {
+			metrics.QuotaRejectionsTotal.Inc()
 			log.Warn("generation quota exceeded", slog.String("username", username))
 			writeError(w, r, http.StatusTooManyRequests, codeQuotaExceeded,
 				fmt.Sprintf("You have used your %d generations for today, try again later",

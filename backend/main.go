@@ -30,6 +30,11 @@ const (
 	// SIGKILL after a grace period, so this has to stay comfortably under theirs
 	// or it accomplishes nothing.
 	shutdownTimeout = 25 * time.Second
+
+	// adminShutdownTimeout is much shorter because a metrics scrape completes in
+	// milliseconds. Giving it the same grace as the API would mean a stuck scraper
+	// could hold the process open for 25 seconds after everything else was done.
+	adminShutdownTimeout = 2 * time.Second
 )
 
 func main() {
@@ -115,11 +120,61 @@ func main() {
 	}
 
 	slog.Info("listening", slog.String("addr", ln.Addr().String()))
+
+	// The metrics listener is started before the API's, so a scrape configured
+	// against a restarting instance does not see a window where the API answers
+	// but /metrics refuses the connection.
+	//
+	// Its error is logged rather than fatal: losing metrics is a degradation, and
+	// exiting would turn a port conflict on an internal endpoint into an outage of
+	// a service that is otherwise perfectly able to serve traffic.
+	stopAdmin := startAdmin(ctx, ":"+config.C.MetricsPort)
+	defer stopAdmin()
+
 	if err := serve(ctx, srv, ln, shutdownTimeout, onSignal); err != nil {
 		slog.Error("serve failed", slog.String("cause", err.Error()))
 		os.Exit(1)
 	}
 	slog.Info("shutdown complete")
+}
+
+// startAdmin serves the metrics endpoint on its own listener and returns a
+// function that waits for it to finish.
+//
+// It shares ctx with the API, so one signal drains both. The returned wait is
+// bounded: a metrics scrape is short, and if it somehow is not, holding process
+// exit open for it would be worse than dropping it.
+func startAdmin(ctx context.Context, addr string) func() {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		slog.Error("metrics endpoint unavailable",
+			slog.String("addr", addr), slog.String("cause", err.Error()))
+		return func() {}
+	}
+
+	done := make(chan struct{})
+	adminSrv := &http.Server{
+		Handler:           handler.AdminHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		defer close(done)
+		if err := serve(ctx, adminSrv, ln, adminShutdownTimeout, nil); err != nil {
+			slog.Error("metrics endpoint failed", slog.String("cause", err.Error()))
+		}
+	}()
+
+	slog.Info("serving metrics", slog.String("addr", ln.Addr().String()))
+
+	return func() {
+		select {
+		case <-done:
+		case <-time.After(adminShutdownTimeout + time.Second):
+			slog.Warn("metrics endpoint did not stop in time")
+		}
+	}
 }
 
 // serve runs srv on ln until ctx is cancelled, then stops accepting new

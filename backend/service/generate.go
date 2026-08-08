@@ -14,6 +14,7 @@ import (
 	"github.com/luc1ferxx/neural-canvas/backend/constants"
 	"github.com/luc1ferxx/neural-canvas/backend/logging"
 	"github.com/luc1ferxx/neural-canvas/backend/media"
+	"github.com/luc1ferxx/neural-canvas/backend/metrics"
 	"github.com/luc1ferxx/neural-canvas/backend/model"
 
 	"github.com/luc1ferxx/neural-canvas/backend/store"
@@ -120,14 +121,37 @@ func renderImage(ctx context.Context, prompt string) ([]byte, error) {
 	if config.C.ImageProvider == config.ProviderStub {
 		logging.FromContext(ctx).Debug("rendering stub image; no OpenAI call",
 			slog.Int("prompt_len", len(prompt)))
-		return renderStubImage(prompt)
+		data, err := renderStubImage(prompt)
+		countGeneration(config.ProviderStub, err)
+		return data, err
 	}
 
 	imageURL, err := generateImageURL(ctx, prompt)
 	if err != nil {
+		// Counted as a failure here rather than only at the handler, because this
+		// is the point where the provider was actually asked. A failure past this
+		// line has already been billed.
+		countGeneration(config.ProviderOpenAI, err)
 		return nil, err
 	}
-	return downloadImage(ctx, imageURL)
+	data, err := downloadImage(ctx, imageURL)
+	countGeneration(config.ProviderOpenAI, err)
+	return data, err
+}
+
+// countGeneration records one attempt against the provider that served it.
+//
+// The openai counter is the only metric in this service with a currency attached:
+// each increment is a paid API call, so it answers "how much did today cost"
+// without reading a bill, and it is the right signal for a cost alert. Splitting
+// by result matters because a failed generation can still have been charged --
+// the download can fail after the image was produced.
+func countGeneration(provider string, err error) {
+	result := metrics.ResultSuccess
+	if err != nil {
+		result = metrics.ResultError
+	}
+	metrics.GenerationsTotal.WithLabelValues(provider, result).Inc()
 }
 
 func generateImageURL(ctx context.Context, prompt string) (string, error) {

@@ -54,6 +54,7 @@ If you have five minutes and want the parts worth reviewing:
 | [`backend/store/gcs_integration_test.go`](backend/store/gcs_integration_test.go) | Tests that were mutation-tested; three of them were wrong the first time, and the comments say how |
 | [`backend/handler/errors.go`](backend/handler/errors.go) | One JSON error envelope with stable codes and the request id, including for the JWT library's own rejections |
 | [`docker-compose.yml`](docker-compose.yml) | The offline stack, and three emulator defaults that are load-bearing in non-obvious ways |
+| [`backend/handler/metrics.go`](backend/handler/metrics.go) | Why the metrics wrap the router instead of using `router.Use`, and what that fixed |
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Unit, lint, integration against real Elasticsearch and a storage emulator, plus a job that boots the compose stack and drives a request end to end |
 
 ## Project Structure
@@ -69,12 +70,13 @@ If you have five minutes and want the parts worth reviewing:
 │   └── package.json
 │
 ├── backend/           # Go backend
-│   ├── handler/       # HTTP handlers, routing, auth middleware
+│   ├── handler/       # HTTP handlers, routing, auth middleware, instrumentation
 │   ├── service/       # business logic
 │   ├── store/         # Elasticsearch + Google Cloud Storage clients
 │   ├── media/         # upload content-type validation
 │   ├── config/        # environment-driven configuration
 │   ├── logging/       # structured logging, request ids
+│   ├── metrics/       # Prometheus instruments, in one file so cardinality is reviewable
 │   ├── Dockerfile     # static binary, non-root, distroless-ish alpine
 │   ├── .env.example
 │   └── go.mod
@@ -128,6 +130,7 @@ message if anything is missing, too short, or unsafe:
 | `IMAGE_PROVIDER` | Optional. `openai` (default) or `stub`. A named switch, not inferred from a missing key |
 | `ALLOWED_ORIGINS` | Comma-separated frontend origins; `*` is rejected |
 | `PORT` | Optional; defaults to 8080 |
+| `METRICS_PORT` | Optional; defaults to 9090. Prometheus `/metrics` on its own listener, so it is not reachable from the API port. Rejected if equal to `PORT` |
 | `LOG_LEVEL` | Optional. `debug`, `info` (default), `warn`, `error`. An unrecognised value is rejected |
 | `STORAGE_EMULATOR_HOST` | Optional. Points the storage client at an emulator. When set, the server also creates the bucket at startup |
 
@@ -265,6 +268,53 @@ not logged; they run every few seconds forever.
 
 `LOG_LEVEL=debug` adds per-request detail — rejected tokens, unparseable bodies,
 stored objects. Useful locally, too noisy and too revealing for production.
+
+#### Metrics
+
+Prometheus metrics on `/metrics`, served on **its own listener** (`METRICS_PORT`,
+default 9090). Not a route on the API: `/metrics` publishes route names, traffic
+volume, error rates, Go runtime internals and the process command line, so it
+belongs on a port the scraper can reach and the public cannot. Putting it behind
+the API's JWT instead would be worse — the scraper would need a user account, and
+would stop working when auth broke, which is exactly when metrics matter.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `http_requests_total` | counter | `method`, `route`, `status` |
+| `http_request_duration_seconds` | histogram | `method`, `route` |
+| `http_requests_in_flight` | gauge | — |
+| `image_generations_total` | counter | `provider`, `result` |
+| `generation_quota_rejections_total` | counter | — |
+| `elasticsearch_operation_duration_seconds` | histogram | `operation` |
+
+Four decisions in there are worth more than the list:
+
+**`route` is the mux path template, never the raw path.** With the raw path, a
+scanner walking `/admin`, `/.env`, `/wp-login.php` allocates a permanent time
+series per probe, in this process and in the scraper — an attacker-controlled
+memory leak in the monitoring path. Unmatched requests all collapse into
+`route="<unmatched>"`, and `/post/{id}` is one series rather than one per post.
+
+**Every request is counted, including the ones that match no route.** The obvious
+way to instrument gorilla/mux is `router.Use`, because it populates the route
+before middleware runs. But mux middleware only runs after a route matches, so
+scanner traffic — the traffic most worth watching — was recorded by neither the
+histogram nor the in-flight gauge, and a 404 flood looked identical to silence.
+The instrumentation is now wrapped around the whole chain and names the route with
+`router.Match`, which costs a second match per request and buys a
+`http_request_duration_seconds_count` that actually equals `http_requests_total`.
+
+**The buckets go to 60s, not Prometheus' default 10s.** `/generate` routinely takes
+10–30 seconds waiting on DALL-E. With the defaults every one of those lands in
+`+Inf`, the one bucket a quantile cannot interpolate within — so the p99 of the
+most expensive endpoint in the service would be unmeasurable while everything else
+looked fine.
+
+**Every series is created at zero on startup.** A labelled Prometheus metric does
+not exist until something observes it, so a fresh process serves a `/metrics` with
+no `image_generations_total` in it at all — and "nothing has been generated yet"
+then reads identically to "the metric was renamed" or "that code path was never
+deployed". Both failures are silent.
 
 ### Health probes
 

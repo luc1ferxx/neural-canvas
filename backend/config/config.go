@@ -27,6 +27,12 @@ type Config struct {
 	AllowedOrigins []string
 	Port           string
 
+	// MetricsPort serves /metrics, on a separate listener from the API. See the
+	// rationale on handler.AdminHandler: metrics expose route names, traffic
+	// volume, error rates and process internals, so they must not be reachable
+	// from wherever the API is.
+	MetricsPort string
+
 	// LogLevel is the minimum severity that gets emitted. Defaults to info.
 	LogLevel slog.Level
 }
@@ -111,6 +117,17 @@ func Load() error {
 	C.Port = strings.TrimSpace(os.Getenv("PORT"))
 	if C.Port == "" {
 		C.Port = "8080"
+	}
+
+	C.MetricsPort = strings.TrimSpace(os.Getenv("METRICS_PORT"))
+	if C.MetricsPort == "" {
+		C.MetricsPort = "9090"
+	}
+	if C.MetricsPort == C.Port {
+		// Sharing the port would silently defeat the reason for having two, and
+		// the second Listen would fail anyway -- better to say why.
+		return fmt.Errorf("METRICS_PORT (%s) must differ from PORT: metrics must not be "+
+			"reachable on the public API port", C.MetricsPort)
 	}
 
 	origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS"))

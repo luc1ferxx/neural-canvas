@@ -120,6 +120,11 @@ services:
       LOG_LEVEL: debug
     ports:
       - "8080:8080"
+      # The metrics listener. Published here because the point of the local stack
+      # is to be able to look at things -- http://localhost:9090/metrics. In a real
+      # deployment this port stays inside the network, reachable by the scraper and
+      # nothing else.
+      - "9090:9090"
     depends_on:
       # service_healthy, not the default. Both dependencies are contacted during
       # startup -- Elasticsearch to create the indices, storage to create the
