@@ -1,11 +1,12 @@
 package service
 
 import (
+   "io"
+   "reflect"
+
    "socialai/backend"
    "socialai/constants"
    "socialai/model"
-   "mime/multipart"
-   "reflect"
 
    "github.com/olivere/elastic/v7"
 )
@@ -57,8 +58,12 @@ func getPostFromSearchResult(searchResult *elastic.SearchResult) []model.Post {
    return posts
 }
 
-func SavePost(post *model.Post, file multipart.File) error {
-   medialink, err := backend.GCSBackend.SaveToGCS(file, post.Id)
+// SavePost stores the media in GCS and indexes the post.
+//
+// contentType must already have been validated against the media allowlist; it
+// is applied to the stored object so GCS does not sniff a type at serve time.
+func SavePost(post *model.Post, file io.Reader, contentType string) error {
+   medialink, err := backend.GCSBackend.SaveToGCS(file, post.Id, contentType)
    if err != nil {
        return err
    }

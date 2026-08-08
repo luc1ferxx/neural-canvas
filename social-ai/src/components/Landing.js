@@ -1,9 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 
 import PhotoAlbum from "react-photo-album";
 import Lightbox from "yet-another-react-lightbox";
-
-import OpenAI from "openai";
 
 import Fullscreen from "yet-another-react-lightbox/plugins/fullscreen";
 import Slideshow from "yet-another-react-lightbox/plugins/slideshow";
@@ -15,7 +13,6 @@ import Paper from "@mui/material/Paper";
 import InputBase from "@mui/material/InputBase";
 import IconButton from "@mui/material/IconButton";
 import ArrowForwardIosIcon from "@mui/icons-material/ArrowForward";
-import FileUploadRoundedIcon from "@mui/icons-material/FileUploadRounded";
 import { BASE_URL, TOKEN_KEY } from "../constants";
 import axios from "axios";
 import { message } from "antd";
@@ -50,40 +47,35 @@ export default function Landing() {
   const [index, setIndex] = useState(-1);
   const [inputValue, setInputValue] = useState("");
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
-  const [generatedImageUrl, setGeneratedImageUrl] = useState();
-  const [slicedPhotos, setSlicedPhotos] = useState();
+  const [photos, setPhotos] = useState([]);
 
-  const openai = new OpenAI({
-    apiKey: process.env.REACT_APP_OPENAI_KEY,
-    dangerouslyAllowBrowser: true,
-  });
-
-  useEffect(() => {
-    if (Boolean(generatedImageUrl)) {
-      setSlicedPhotos([
-        {
-          src: generatedImageUrl,
-          width: 200,
-          height: 200,
-        },
-      ]);
+  // Generation runs entirely on the backend: it calls DALL-E, stores the result
+  // in GCS and indexes the post, then returns it. The OpenAI key stays on the
+  // server -- it used to be read from process.env here, which Create React App
+  // inlines into the production bundle for every visitor to read.
+  const createImage = async () => {
+    const prompt = inputValue.trim();
+    if (!prompt) {
+      message.warning("Please describe the image you want to generate.");
       return;
     }
-  }, [generatedImageUrl]);
 
-  const createImage = async () => {
     try {
       setIsGeneratingImage(true);
 
-      const response = await openai.images.generate({
-        model: "dall-e-3",
-        prompt: inputValue,
-        n: 1,
-        size: "1024x1024",
+      const res = await axios({
+        method: "POST",
+        url: `${BASE_URL}/generate`,
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}`,
+          "Content-Type": "application/json",
+        },
+        data: { prompt },
       });
 
-      const image_url = response.data[0].url;
-      setGeneratedImageUrl(image_url);
+      const post = res.data;
+      setPhotos([{ src: post.url, width: 200, height: 200 }]);
+      message.success("Image generated and saved to your collection!");
     } catch (error) {
       message.error(
         "Something went wrong with AI generated image. Please try again.",
@@ -96,43 +88,6 @@ export default function Landing() {
 
   const handleInputChange = (event) => {
     setInputValue(event.target.value);
-  };
-
-  const handleUploadImage = async () => {
-    fetch(generatedImageUrl.replace(/https:\/\/[^/]+/, "/api"))
-      .then((response) => response.blob())
-      .then((blob) => {
-        let formData = new FormData();
-        formData.append("message", "AI generated image");
-        const file = new File([blob], `upload.jpg`, {
-          type: `image/jpg`,
-        });
-        formData.append("media_file", file);
-
-        const opt = {
-          method: "POST",
-          url: `${BASE_URL}/upload`,
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}`,
-          },
-          data: formData,
-        };
-
-        axios(opt)
-          .then((res) => {
-            if (res.status === 200) {
-              console.log("success!!!");
-              message.success("Image uploaded successfully!");
-            }
-          })
-          .catch((err) => {
-            console.log("upload image/video failed: ", err.message);
-            message.error("Failed to upload image/video!");
-          })
-          .finally(() => {
-            setIndex(-1);
-          });
-      });
   };
 
   return (
@@ -207,29 +162,16 @@ export default function Landing() {
         </Paper>
       </HeaderContainer>
       <PhotoAlbum
-        photos={slicedPhotos}
+        photos={photos}
         layout="rows"
         targetRowHeight={200}
         onClick={({ index }) => setIndex(index)}
       />
       <Lightbox
-        slides={slicedPhotos}
+        slides={photos}
         open={index >= 0}
         index={index}
         close={() => setIndex(-1)}
-        toolbat={{
-          buttons: [
-            <IconButton
-              key="upload"
-              type="button"
-              sx={{ p: "10px" }}
-              aria-label="search"
-              onClick={handleUploadImage}
-            >
-              <FileUploadRoundedIcon sx={{ color: "#CCCCCC" }} />
-            </IconButton>,
-          ],
-        }}
         plugins={[Fullscreen, Slideshow, Thumbnails, Zoom]}
       />
     </MainContainer>

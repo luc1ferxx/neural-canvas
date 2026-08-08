@@ -1,59 +1,145 @@
 # Social AI
 
-A full-stack application combining AI image generation with social sharing capabilities.
+A full-stack application combining AI image generation with social sharing.
 
 ## Project Structure
 
 ```
 .
-├── frontend/          # React frontend application
+├── social-ai/         # React frontend (Create React App)
 │   ├── src/
 │   ├── public/
-│   ├── package.json
-│   └── ...
+│   ├── .env.example
+│   └── package.json
 │
-├── backend/           # Backend API server
-│   ├── src/
-│   ├── pom.xml
-│   └── ...
+├── socialai/          # Go backend (App Engine flexible)
+│   ├── handler/       # HTTP handlers, routing, auth middleware
+│   ├── service/       # business logic
+│   ├── backend/       # Elasticsearch + Google Cloud Storage clients
+│   ├── media/         # upload content-type validation
+│   ├── config/        # environment-driven configuration
+│   ├── .env.example
+│   └── go.mod
 │
 └── README.md
 ```
 
-## Frontend (social-ai)
+## Configuration
 
-React-based frontend with Material-UI components and image gallery features.
+No credentials live in source. Both halves read configuration from the
+environment and ship a `.env.example` listing what is required.
 
-### Setup
-```bash
-cd social-ai
-npm install
-npm start
-```
+**Backend** — copy `socialai/.env.example` to `socialai/.env` and fill it in.
+The server validates everything at startup and exits with a single explanatory
+message if anything is missing, too short, or unsafe:
+
+| Variable | Notes |
+|---|---|
+| `ES_URL` | Use `https` outside local dev; basic auth over plain http sends the password in cleartext |
+| `ES_USERNAME`, `ES_PASSWORD` | Elasticsearch credentials |
+| `GCS_BUCKET` | Bucket for uploaded and generated media |
+| `JWT_SECRET` | HS256 signing key, minimum 32 chars (`openssl rand -base64 48`) |
+| `OPENAI_API_KEY` | Server-side only, never exposed to the browser |
+| `ALLOWED_ORIGINS` | Comma-separated frontend origins; `*` is rejected |
+| `PORT` | Optional, App Engine sets it; defaults to 8080 |
+
+**Frontend** — copy `social-ai/.env.example` to `social-ai/.env.local`. Only
+non-secret values belong there: Create React App inlines every `REACT_APP_*`
+variable into the production bundle, where anyone can read it.
 
 ## Backend (socialai)
 
-Backend API server providing authentication and image management endpoints.
+Go 1.25+. Elasticsearch for users and posts, Google Cloud Storage for media.
 
-### Setup
 ```bash
 cd socialai
-# Follow backend setup instructions
+cp .env.example .env      # then edit
+set -a && . ./.env && set +a
+go run .
 ```
+
+```bash
+go build ./...            # compile
+go vet ./...              # static checks
+go test ./...             # tests
+```
+
+### Endpoints
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| `POST` | `/signup` | — | Create an account |
+| `POST` | `/signin` | — | Exchange credentials for a 24h JWT |
+| `POST` | `/generate` | JWT | Generate an image from a prompt, store it, return the post |
+| `POST` | `/upload` | JWT | Upload media and create a post |
+| `GET` | `/search` | JWT | Search posts by `user` or `keywords` |
+
+### Authentication
+
+Passwords are stored as bcrypt hashes; the plaintext is never persisted and
+never part of a query. Sign-in looks the user up by username and compares the
+hash in application code.
+
+Failed sign-ins are throttled per username (5 attempts per 15 minutes). The
+counter is in process memory, so with more than one instance the effective limit
+is per-instance — move it to a shared store if the instance count grows.
+
+### Media handling
+
+Uploads are capped at 32 MiB and typed by inspecting their leading bytes, not by
+filename extension. Only JPEG, PNG, GIF, WebP, MP4, WebM and AVI are accepted.
+
+Objects in the bucket are world-readable, so script-capable formats are refused
+outright: an accepted `.svg` or `.html` would be stored XSS served from the
+app's own storage domain. Note this is stricter than before — QuickTime `.mov`,
+`.flv` and `.wmv` are no longer accepted, because Go's content sniffer cannot
+positively identify them.
+
+## Frontend (social-ai)
+
+```bash
+cd social-ai
+npm install
+cp .env.example .env.local   # then edit
+npm start
+```
+
+```bash
+npm run build             # production build
+npm test                  # tests
+```
+
+Image generation calls the backend's `POST /generate`, which invokes DALL-E,
+stores the result, and returns the saved post. The frontend holds no API key.
 
 ## Features
 
-- User authentication (signup/login)
-- AI-powered image generation using DALL-E
+- User authentication (signup/login) with bcrypt-hashed passwords
+- AI image generation via DALL-E, executed server-side
 - Image upload and gallery management
-- Social sharing capabilities
+- Search by keyword or user
 - Responsive design
 
 ## Technologies
 
-- **Frontend**: React, Material-UI, Axios, React Router
-- **Backend**: (Backend tech stack)
+- **Frontend**: React 18, Material-UI, antd, Axios, React Router
+- **Backend**: Go, gorilla/mux, Elasticsearch, Google Cloud Storage
+- **Auth**: JWT (HS256), bcrypt
 - **API**: RESTful endpoints
+
+## Known gaps
+
+Tracked but not yet addressed:
+
+- `GET /search` returns at most 10 results — `ReadFromES` sets no page size, so
+  it takes the Elasticsearch default. The frontend then filters by type client
+  side, so a tab can read "No images!" while images exist.
+- `DELETE /post/{id}` is not routed. The frontend calls it and the handler is
+  written, but the route is commented out, so deletion always fails.
+- `social-ai/src/App.test.js` imports `./App`, but the component lives in
+  `./components/App` — the only frontend test does not run.
+- Search keywords are not URL-encoded, so terms containing `&` or `#` search
+  for the wrong thing.
 
 ## License
 
