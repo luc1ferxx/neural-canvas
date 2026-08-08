@@ -90,6 +90,8 @@ CI runs them with an Elasticsearch service container.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|
+| `GET` | `/healthz` | — | Liveness. Is this process running |
+| `GET` | `/readyz` | — | Readiness. Can this process serve traffic |
 | `POST` | `/signup` | — | Create an account |
 | `POST` | `/signin` | — | Exchange credentials for a 24h JWT |
 | `POST` | `/signout` | JWT | Revoke every token issued to the caller so far |
@@ -110,12 +112,91 @@ indistinguishable, so the API does not confirm that another user's post id
 exists. The media object is deleted before the index entry, because bucket
 objects are world-readable and a leftover file would stay fetchable by URL.
 
+### Errors
+
+Every failure has the same shape:
+
+```json
+{
+  "error": {
+    "code": "rate_limited",
+    "message": "Too many failed sign-in attempts, try again later",
+    "request_id": "9f2c41a8bd3e5107"
+  }
+}
+```
+
+`code` is stable and meant to be branched on. `message` is prose and may be
+reworded at any time, so matching on it is a bug waiting to happen. This replaced
+35 `text/plain` responses — a JSON client could not parse them, and status codes
+alone cannot separate "username taken" from "password too short", both 400.
+
+Internal detail never reaches the client. A wrapped Elasticsearch error or an
+OpenAI quota message goes to the log with the request id attached; the client gets
+a generic message and the same id.
+
+### Observability
+
+Logs are JSON on stdout via `log/slog`, using the field names Cloud Logging reads
+(`severity`, `message`, `timestamp`) rather than slog's defaults — with the
+defaults, every entry arrives at severity "default" and filtering by severity in
+the log viewer returns nothing.
+
+Each request gets an id, taken from an inbound `X-Request-Id` when there is one so
+it survives the hop from a load balancer, and generated otherwise. It is attached
+to every log line the request produces, echoed in the response header, and
+included in error bodies. That is what makes a user's report actionable: the id
+they can see is the id in the log.
+
+An inbound id is accepted only if it is alphanumeric with dashes and underscores,
+at most 64 characters. An id containing a newline could forge log entries in a
+line-oriented log, and an unbounded one could flood every line the request emits.
+
+Access log level tracks the outcome: 5xx at error, 4xx at warn, the rest at info,
+so a spike of 401s from a stale frontend does not look like an outage. Probes are
+not logged; they run every few seconds forever.
+
+`LOG_LEVEL=debug` adds per-request detail — rejected tokens, unparseable bodies,
+stored objects. Useful locally, too noisy and too revealing for production.
+
+### Health probes
+
+Two endpoints, because they answer different questions and a single one cannot.
+
+`/healthz` is liveness and checks nothing but itself. If it reported unhealthy
+whenever Elasticsearch was unreachable, an orchestrator would respond to an
+Elasticsearch outage by killing and restarting every instance — which does not
+repair Elasticsearch, and turns a recoverable dependency blip into a restart loop.
+Liveness asks "is this process wedged", and only a restart fixes that.
+
+`/readyz` is readiness and pings Elasticsearch, answering 503 when it cannot be
+reached. That takes the instance out of the load balancer's rotation without
+killing it, so it rejoins by itself once the dependency recovers. 503 rather than
+500 because it tells a load balancer to look elsewhere instead of retrying here.
+
+### Lifecycle
+
+The server traps `SIGTERM` and `SIGINT`, stops accepting connections, and gives
+in-flight handlers 25 seconds to finish — under App Engine's own grace period, so
+it has time to matter. Before this the process was killed outright, and a 32 MiB
+upload became a connection reset with no status code to interpret.
+
+Every outbound call takes a context derived from the request, so a client that
+hangs up cancels the Elasticsearch query it was waiting on, and each call has its
+own deadline (`backend/store/timeouts.go`). The bounds differ by two orders of
+magnitude because a keyword lookup and a 32 MiB upload are not the same operation.
+
+One deliberate exception: once `/generate` has called DALL-E, OpenAI has been
+billed, so the GCS upload and index write that follow run under
+`context.WithoutCancel`. A client hanging up during a 30-second wait is ordinary,
+and cancelling there would spend the money and throw the image away.
+
 ### Authentication
 
 Passwords are stored as bcrypt hashes; the plaintext is never persisted and
 never part of a query. Sign-in looks the user up by document id, which is
 realtime in Elasticsearch, so a freshly registered account can log in
-immediately.
+immediately. `POST /signin` returns `{"token": "..."}`.
 
 Signing out is enforced server-side. A JWT is self-contained, so clearing it in
 the browser alone left it valid for the remainder of its 24 hours. `POST

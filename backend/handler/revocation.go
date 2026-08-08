@@ -2,9 +2,10 @@ package handler
 
 import (
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"net/http"
 
+	"github.com/luc1ferxx/neural-canvas/backend/logging"
 	"github.com/luc1ferxx/neural-canvas/backend/service"
 
 	jwt "github.com/form3tech-oss/jwt-go"
@@ -53,17 +54,17 @@ func requireLiveSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := r.Context().Value("user").(*jwt.Token)
 		if !ok || token == nil {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "Unauthorized")
 			return
 		}
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "Unauthorized")
 			return
 		}
 		username, ok := claims["username"].(string)
 		if !ok || username == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "Unauthorized")
 			return
 		}
 
@@ -71,21 +72,23 @@ func requireLiveSession(next http.Handler) http.Handler {
 		if !ok {
 			// Tokens minted before the iat claim existed cannot be checked
 			// against a revocation cutoff, so they are not trusted.
-			http.Error(w, "Session is no longer valid, please sign in again",
-				http.StatusUnauthorized)
+			writeError(w, r, http.StatusUnauthorized, codeSessionRevoked,
+				"Session is no longer valid, please sign in again")
 			return
 		}
 
 		validAfter, err := service.TokensValidAfter(r.Context(), username)
 		if err != nil {
-			http.Error(w, "Failed to verify session", http.StatusInternalServerError)
-			fmt.Printf("Failed to verify session for %q: %v\n", username, err)
+			logging.FromContext(r.Context()).Error("could not verify session",
+				slog.String("username", username), slog.String("cause", err.Error()))
+			writeError(w, r, http.StatusInternalServerError, codeInternal,
+				"Failed to verify session")
 			return
 		}
 
 		if issuedAt < validAfter {
-			http.Error(w, "Session is no longer valid, please sign in again",
-				http.StatusUnauthorized)
+			writeError(w, r, http.StatusUnauthorized, codeSessionRevoked,
+				"Session is no longer valid, please sign in again")
 			return
 		}
 
@@ -95,20 +98,21 @@ func requireLiveSession(next http.Handler) http.Handler {
 
 // signoutHandler revokes every token issued to the caller so far.
 func signoutHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Received one signout request")
+	log := logging.FromContext(r.Context())
 
 	username, ok := usernameFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "Unauthorized")
 		return
 	}
 
 	if err := service.RevokeTokens(r.Context(), username); err != nil {
-		http.Error(w, "Failed to sign out", http.StatusInternalServerError)
-		fmt.Printf("Failed to revoke tokens for %q: %v\n", username, err)
+		log.Error("could not revoke tokens",
+			slog.String("username", username), slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "Failed to sign out")
 		return
 	}
 
-	fmt.Printf("Signed out %s\n", username)
+	log.Info("signed out", slog.String("username", username))
 	writeJSON(w, http.StatusOK, map[string]string{"username": username})
 }

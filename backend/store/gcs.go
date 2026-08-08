@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/logging"
 
 	"cloud.google.com/go/storage"
 )
@@ -75,7 +77,10 @@ func (backend *GoogleCloudStorageBackend) SaveToGCS(ctx context.Context, r io.Re
 		return "", fmt.Errorf("read attrs of %q: %w", objectName, err)
 	}
 
-	fmt.Printf("File is saved to GCS: %s\n", attrs.MediaLink)
+	// Debug, not info: the handler already logs one line per created post with
+	// the id. At info this doubled every upload's output for no extra fact.
+	logging.FromContext(ctx).Debug("object stored",
+		slog.String("object", objectName), slog.String("content_type", contentType))
 	return attrs.MediaLink, nil
 }
 

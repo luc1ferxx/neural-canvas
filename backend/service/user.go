@@ -96,7 +96,8 @@ func AddUser(ctx context.Context, user *model.User) error {
 		return err
 	}
 
-	fmt.Printf("User is added: %s\n", user.Username)
+	// No log line here: signupHandler already records the registration with the
+	// request id attached, which this could not have done.
 	return nil
 }
 

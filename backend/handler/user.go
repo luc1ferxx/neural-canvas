@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"time"
 
 	"github.com/luc1ferxx/neural-canvas/backend/config"
+	"github.com/luc1ferxx/neural-canvas/backend/logging"
 	"github.com/luc1ferxx/neural-canvas/backend/model"
 	"github.com/luc1ferxx/neural-canvas/backend/service"
 
@@ -29,10 +31,21 @@ const (
 	maxPasswordLen = 72 // bcrypt silently truncates beyond 72 bytes
 	// maxAuthBodyBytes caps the credential payload; nothing legitimate is large.
 	maxAuthBodyBytes = 4 << 10
+	// tokenTTL is how long an issued token stays valid.
+	tokenTTL = 24 * time.Hour
 )
 
+// signinResponse carries the token as JSON.
+//
+// This used to be a bare text/plain body. A JSON object costs nothing now and
+// means a field can be added later -- an expiry, a refresh token -- without
+// every existing client having to be changed on the same day.
+type signinResponse struct {
+	Token string `json:"token"`
+}
+
 func signinHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Received one signin request")
+	log := logging.FromContext(r.Context())
 
 	user, ok := decodeCredentials(w, r)
 	if !ok {
@@ -45,54 +58,61 @@ func signinHandler(w http.ResponseWriter, r *http.Request) {
 	// rather than locking everyone out on a transient error.
 	allowed, err := service.LoginAllowed(r.Context(), user.Username)
 	if err != nil {
-		fmt.Printf("Could not read login throttle for %q: %v\n", user.Username, err)
+		log.Warn("could not read login throttle",
+			slog.String("username", user.Username), slog.String("cause", err.Error()))
 	} else if !allowed {
-		http.Error(w, "Too many failed sign-in attempts, try again later", http.StatusTooManyRequests)
-		fmt.Printf("Throttled sign-in for %q\n", user.Username)
+		log.Warn("throttled sign-in", slog.String("username", user.Username))
+		writeError(w, r, http.StatusTooManyRequests, codeRateLimited,
+			"Too many failed sign-in attempts, try again later")
 		return
 	}
 
 	success, err := service.CheckUser(r.Context(), user.Username, user.Password)
 	if err != nil {
-		http.Error(w, "Failed to verify credentials", http.StatusInternalServerError)
-		fmt.Printf("Failed to verify credentials %v\n", err)
+		log.Error("could not verify credentials", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal,
+			"Failed to verify credentials")
 		return
 	}
 
 	if !success {
 		if err := service.RecordLoginFailure(r.Context(), user.Username); err != nil {
-			fmt.Printf("Could not record login failure for %q: %v\n", user.Username, err)
+			log.Warn("could not record login failure",
+				slog.String("username", user.Username), slog.String("cause", err.Error()))
 		}
-		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		writeError(w, r, http.StatusUnauthorized, codeUnauthorized,
+			"Invalid username or password")
 		return
 	}
 
 	if err := service.ClearLoginFailures(r.Context(), user.Username); err != nil {
-		fmt.Printf("Could not clear login failures for %q: %v\n", user.Username, err)
+		log.Warn("could not clear login failures",
+			slog.String("username", user.Username), slog.String("cause", err.Error()))
 	}
 
+	now := time.Now()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"username": user.Username,
-		"iat":      time.Now().Unix(),
-		"exp":      time.Now().Add(time.Hour * 24).Unix(),
+		"iat":      now.Unix(),
+		"exp":      now.Add(tokenTTL).Unix(),
 	})
 
 	// Signed with the secret from the environment. This used to be the literal
 	// []byte("secret"), which let anyone mint a token for any username.
 	tokenString, err := token.SignedString(config.C.JWTSecret)
 	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
-		fmt.Printf("Failed to generate token %v\n", err)
+		log.Error("could not sign token", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal,
+			"Failed to generate token")
 		return
 	}
 
-	// Plain text, because the frontend stores the response body verbatim.
-	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte(tokenString))
+	log.Info("signed in", slog.String("username", user.Username))
+	writeJSON(w, http.StatusOK, signinResponse{Token: tokenString})
 }
 
 func signupHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Received one signup request")
+	log := logging.FromContext(r.Context())
 
 	user, ok := decodeCredentials(w, r)
 	if !ok {
@@ -100,29 +120,30 @@ func signupHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !usernamePattern.MatchString(user.Username) {
-		http.Error(w,
-			"Username must be 3-32 characters of lowercase letters, digits, underscore or dash",
-			http.StatusBadRequest)
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest,
+			"Username must be 3-32 characters of lowercase letters, digits, underscore or dash")
 		return
 	}
 	if len(user.Password) < minPasswordLen || len(user.Password) > maxPasswordLen {
-		http.Error(w,
-			fmt.Sprintf("Password must be between %d and %d characters", minPasswordLen, maxPasswordLen),
-			http.StatusBadRequest)
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest,
+			fmt.Sprintf("Password must be between %d and %d characters", minPasswordLen, maxPasswordLen))
 		return
 	}
 
 	if err := service.AddUser(r.Context(), user); err != nil {
 		if errors.Is(err, service.ErrUserExists) {
-			http.Error(w, "User already exists", http.StatusBadRequest)
+			// A distinct code, because "username taken" and "password too short"
+			// are both 400 and a client needs to tell them apart to know which
+			// field to highlight.
+			writeError(w, r, http.StatusConflict, codeUserExists, "User already exists")
 			return
 		}
-		http.Error(w, "Failed to save user", http.StatusInternalServerError)
-		fmt.Printf("Failed to save user %v\n", err)
+		log.Error("could not save user", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "Failed to save user")
 		return
 	}
 
-	fmt.Printf("User added successfully: %s.\n", user.Username)
+	log.Info("user registered", slog.String("username", user.Username))
 	writeJSON(w, http.StatusOK, map[string]string{"username": user.Username})
 }
 
@@ -132,12 +153,17 @@ func decodeCredentials(w http.ResponseWriter, r *http.Request) (*model.User, boo
 	decoder := json.NewDecoder(io.LimitReader(r.Body, maxAuthBodyBytes))
 	var user model.User
 	if err := decoder.Decode(&user); err != nil {
-		http.Error(w, "Cannot decode user data from client", http.StatusBadRequest)
-		fmt.Printf("Cannot decode user data from client %v\n", err)
+		// Logged at debug: a malformed body is the client's problem, and at info
+		// it would let anyone fill the log by posting garbage in a loop.
+		logging.FromContext(r.Context()).Debug("could not decode credentials",
+			slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest,
+			"Cannot decode user data from client")
 		return nil, false
 	}
 	if user.Username == "" || user.Password == "" {
-		http.Error(w, "Username and password are required", http.StatusBadRequest)
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest,
+			"Username and password are required")
 		return nil, false
 	}
 	return &user, true

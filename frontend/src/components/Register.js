@@ -2,7 +2,7 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { Form, Input, Button, message } from "antd";
 
-import api from "../api";
+import api, { errorMessage } from "../api";
 
 // (mobile) responsiveness design
 const formItemLayout = {
@@ -49,11 +49,7 @@ function Register(props) {
         // The backend validates the username format, the password length and
         // whether the name is taken, and explains which one failed. Showing
         // only "Registration failed!" hid all of that from the user.
-        const detail =
-          error.response && typeof error.response.data === "string"
-            ? error.response.data.trim()
-            : "";
-        message.error(detail || "Registration failed!");
+        message.error(errorMessage(error, "Registration failed!"));
       });
   };
 

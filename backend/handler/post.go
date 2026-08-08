@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
+	"github.com/luc1ferxx/neural-canvas/backend/logging"
 	"github.com/luc1ferxx/neural-canvas/backend/media"
 	"github.com/luc1ferxx/neural-canvas/backend/model"
 	"github.com/luc1ferxx/neural-canvas/backend/service"
@@ -15,11 +17,11 @@ import (
 )
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Received one upload request")
+	log := logging.FromContext(r.Context())
 
 	username, ok := usernameFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "Unauthorized")
 		return
 	}
 
@@ -29,8 +31,9 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("media_file")
 	if err != nil {
-		http.Error(w, "Media file is not available or exceeds the size limit", http.StatusBadRequest)
-		fmt.Printf("Media file is not available %v\n", err)
+		log.Debug("media file unavailable", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest,
+			"Media file is not available or exceeds the size limit")
 		return
 	}
 	// Close on a read is discarded deliberately: it reports nothing actionable.
@@ -44,13 +47,14 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var unsupported *media.ErrUnsupported
 		if errors.As(err, &unsupported) {
-			http.Error(w,
-				fmt.Sprintf("Unsupported media type (%s). Allowed: JPEG, PNG, GIF, WebP, MP4, WebM, AVI.", unsupported.MIME),
-				http.StatusUnsupportedMediaType)
+			writeError(w, r, http.StatusUnsupportedMediaType, codeUnsupportedType,
+				fmt.Sprintf("Unsupported media type (%s). Allowed: JPEG, PNG, GIF, WebP, MP4, WebM, AVI.",
+					unsupported.MIME))
 			return
 		}
-		http.Error(w, "Failed to inspect media file", http.StatusInternalServerError)
-		fmt.Printf("Failed to inspect media file %v\n", err)
+		log.Error("could not inspect media file", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal,
+			"Failed to inspect media file")
 		return
 	}
 
@@ -62,12 +66,17 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := service.SavePost(r.Context(), &p, body, mime); err != nil {
-		http.Error(w, "Failed to save post to backend", http.StatusInternalServerError)
-		fmt.Printf("Failed to save post to backend %v\n", err)
+		log.Error("could not save post",
+			slog.String("post_id", p.Id), slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal,
+			"Failed to save post")
 		return
 	}
 
-	fmt.Println("Post is saved successfully.")
+	log.Info("post created",
+		slog.String("post_id", p.Id),
+		slog.String("username", username),
+		slog.String("type", postType))
 	// Return the post so the client can render it without refetching.
 	writeJSON(w, http.StatusOK, p)
 }
@@ -77,7 +86,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 var validPostTypes = map[string]bool{"image": true, "video": true}
 
 func searchHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Received one request for search")
+	log := logging.FromContext(r.Context())
 
 	q := r.URL.Query()
 	from, size := parsePagination(q)
@@ -95,8 +104,9 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		Size:     size,
 	})
 	if err != nil {
-		http.Error(w, "Failed to read post from backend", http.StatusInternalServerError)
-		fmt.Printf("Failed to read post from backend %v.\n", err)
+		log.Error("could not read posts", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal,
+			"Failed to read posts")
 		return
 	}
 
@@ -106,10 +116,13 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 
 	js, err := json.Marshal(posts)
 	if err != nil {
-		http.Error(w, "Failed to parse posts into JSON format", http.StatusInternalServerError)
-		fmt.Printf("Failed to parse posts into JSON format %v.\n", err)
+		log.Error("could not encode posts", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal,
+			"Failed to encode posts")
 		return
 	}
+
+	log.Debug("search served", slog.Int("results", len(posts)), slog.String("type", postType))
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(js)
 }
@@ -119,17 +132,17 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 // The route for this existed only as a commented-out line, so the frontend's
 // delete button called an endpoint that always 404'd.
 func deleteHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Received one delete request")
+	log := logging.FromContext(r.Context())
 
 	username, ok := usernameFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "Unauthorized")
 		return
 	}
 
 	id := mux.Vars(r)["id"]
 	if id == "" {
-		http.Error(w, "Post id is required", http.StatusBadRequest)
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest, "Post id is required")
 		return
 	}
 
@@ -137,14 +150,15 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 	// cannot delete another's post.
 	if err := service.DeletePost(r.Context(), id, username); err != nil {
 		if errors.Is(err, service.ErrPostNotFound) {
-			http.Error(w, "Post not found", http.StatusNotFound)
+			writeError(w, r, http.StatusNotFound, codeNotFound, "Post not found")
 			return
 		}
-		http.Error(w, "Failed to delete post", http.StatusInternalServerError)
-		fmt.Printf("Failed to delete post %v\n", err)
+		log.Error("could not delete post",
+			slog.String("post_id", id), slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "Failed to delete post")
 		return
 	}
 
-	fmt.Printf("Post %s deleted by %s\n", id, username)
+	log.Info("post deleted", slog.String("post_id", id), slog.String("username", username))
 	writeJSON(w, http.StatusOK, map[string]string{"id": id})
 }

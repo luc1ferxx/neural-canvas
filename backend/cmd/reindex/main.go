@@ -14,6 +14,11 @@
 //
 // The command is safe to run more than once: it refuses to copy into a
 // non-empty destination unless -force is given.
+//
+// Output here is fmt.Print rather than slog, deliberately. The server's log is
+// machine-readable because a collector consumes it; this is a one-shot command
+// whose consumer is a person watching a terminal, and rendering a progress report
+// as JSON entries would make it harder to read, not easier to query.
 package main
 
 import (

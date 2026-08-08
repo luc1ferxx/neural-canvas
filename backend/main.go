@@ -5,14 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/luc1ferxx/neural-canvas/backend/config"
 	"github.com/luc1ferxx/neural-canvas/backend/handler"
+	"github.com/luc1ferxx/neural-canvas/backend/logging"
 	"github.com/luc1ferxx/neural-canvas/backend/store"
 )
 
@@ -30,8 +33,6 @@ const (
 )
 
 func main() {
-	fmt.Println("started-service")
-
 	// Cancelled on SIGTERM (what App Engine and Kubernetes send to retire an
 	// instance) or SIGINT (Ctrl-C locally). Everything downstream derives from
 	// this, so a signal during a slow startup aborts it rather than being ignored
@@ -41,15 +42,21 @@ func main() {
 
 	// Load and validate configuration before anything else, so a missing secret
 	// is one clear message at startup rather than a panic on the first request.
+	// log.Fatalf rather than slog here, deliberately: the log level is itself a
+	// config value, so structured logging cannot be configured until this returns.
 	if err := config.Load(); err != nil {
 		log.Fatalf("configuration error: %v", err)
 	}
+
+	logging.Init(config.C.LogLevel)
+	slog.Info("starting", slog.String("log_level", config.C.LogLevel.String()))
 
 	startupCtx, cancelStartup := context.WithTimeout(ctx, startupTimeout)
 	defer cancelStartup()
 
 	if err := store.InitElasticsearchBackend(startupCtx); err != nil {
-		log.Fatalf("elasticsearch: %v", err)
+		slog.Error("elasticsearch unavailable", slog.String("cause", err.Error()))
+		os.Exit(1)
 	}
 
 	// Deliberately the signal context and not startupCtx: the GCS client resolves
@@ -58,7 +65,8 @@ func main() {
 	// the process lifetime would then break uploads long after a successful
 	// startup. Cancellation on shutdown is still wanted; an expiry is not.
 	if err := store.InitGCSBackend(ctx); err != nil {
-		log.Fatalf("google cloud storage: %v", err)
+		slog.Error("google cloud storage unavailable", slog.String("cause", err.Error()))
+		os.Exit(1)
 	}
 
 	// App Engine supplies PORT; default 8080 for local runs.
@@ -68,7 +76,8 @@ func main() {
 	// here with the address in the message rather than from inside the lifecycle.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("listen on %s: %v", addr, err)
+		slog.Error("cannot listen", slog.String("addr", addr), slog.String("cause", err.Error()))
+		os.Exit(1)
 	}
 
 	// An explicit server rather than http.ListenAndServe, which has no timeouts
@@ -94,14 +103,16 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		stop()
-		fmt.Printf("signal received, draining for up to %s\n", shutdownTimeout)
+		slog.Info("signal received, draining",
+			slog.String("grace", shutdownTimeout.String()))
 	}()
 
-	fmt.Printf("listening on %s\n", ln.Addr())
+	slog.Info("listening", slog.String("addr", ln.Addr().String()))
 	if err := serve(ctx, srv, ln, shutdownTimeout); err != nil {
-		log.Fatalf("serve: %v", err)
+		slog.Error("serve failed", slog.String("cause", err.Error()))
+		os.Exit(1)
 	}
-	fmt.Println("shutdown complete")
+	slog.Info("shutdown complete")
 }
 
 // serve runs srv on ln until ctx is cancelled, then stops accepting new

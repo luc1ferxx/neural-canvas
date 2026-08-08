@@ -3,7 +3,7 @@ import { Form, Input, Button, message } from "antd";
 import { UserOutlined, LockOutlined } from "@ant-design/icons";
 import { Link } from "react-router-dom";
 
-import api from "../api";
+import api, { errorCode, errorMessage } from "../api";
 
 function Login(props) {
   const { handleLoggedIn } = props;
@@ -15,20 +15,27 @@ function Login(props) {
       .post("/signin", { username, password })
       .then((res) => {
         if (res.status === 200) {
-          handleLoggedIn(res.data);
+          // The token arrives as {"token": "..."}. It used to be the whole
+          // response body as text/plain, so passing res.data straight through
+          // would now hand the caller an object.
+          handleLoggedIn(res.data.token);
           message.success("Login succeeded! ");
         }
       })
       .catch((err) => {
         console.log("login failed: ", err.message);
-        // 401 is a wrong username or password; 429 is the sign-in throttle.
+        // Branch on the backend's stable code where there is one, and fall back
+        // to the status for a response that never reached the app.
+        const code = errorCode(err);
         const status = err.response && err.response.status;
-        if (status === 429) {
-          message.error("Too many failed attempts. Please try again later.");
-        } else if (status === 401) {
+        if (code === "rate_limited" || status === 429) {
+          message.error(
+            errorMessage(err, "Too many failed attempts. Please try again later."),
+          );
+        } else if (code === "unauthorized" || status === 401) {
           message.error("Invalid username or password.");
         } else {
-          message.error("Login failed!");
+          message.error(errorMessage(err, "Login failed!"));
         }
       });
   };

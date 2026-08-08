@@ -86,3 +86,53 @@ api.interceptors.response.use(
 );
 
 export default api;
+
+/**
+ * Reads the backend's error envelope: {"error": {code, message, request_id}}.
+ *
+ * Centralised here because the alternative is every component knowing the wire
+ * format. It also has to cope with three other shapes that are not that envelope:
+ * a plain string (an older deployment, or an infrastructure error page from a
+ * proxy that never reached the app), and nothing at all (the request never got a
+ * response, so there is no body to read).
+ */
+const envelope = (error) => {
+  const data = error && error.response && error.response.data;
+  if (data && typeof data === "object" && data.error) {
+    return data.error;
+  }
+  return null;
+};
+
+/**
+ * A stable code to branch on, or "" when the response carried none.
+ *
+ * Prefer this over matching on the message: the message is prose and may be
+ * reworded, whereas the code is part of the contract.
+ */
+export const errorCode = (error) => {
+  const detail = envelope(error);
+  return (detail && detail.code) || "";
+};
+
+/** The request id, for a user to quote in a bug report. */
+export const errorRequestID = (error) => {
+  const detail = envelope(error);
+  return (detail && detail.request_id) || "";
+};
+
+/**
+ * The message to show the user, falling back when the server did not supply one.
+ */
+export const errorMessage = (error, fallback) => {
+  const detail = envelope(error);
+  if (detail && detail.message) {
+    return detail.message;
+  }
+  // A pre-envelope deployment, or a proxy error page.
+  const data = error && error.response && error.response.data;
+  if (typeof data === "string" && data.trim()) {
+    return data.trim();
+  }
+  return fallback;
+};

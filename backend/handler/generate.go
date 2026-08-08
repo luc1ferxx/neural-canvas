@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/luc1ferxx/neural-canvas/backend/logging"
 	"github.com/luc1ferxx/neural-canvas/backend/service"
 )
 
@@ -25,42 +28,49 @@ type generateRequest struct {
 // held the API key (inlined into the bundle by Create React App) and called
 // OpenAI directly, which published the key to every visitor.
 func generateHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Received one generate request")
+	log := logging.FromContext(r.Context())
 
 	username, ok := usernameFromContext(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "Unauthorized")
 		return
 	}
 
 	var req generateRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxGenerateBody)).Decode(&req); err != nil {
-		http.Error(w, "Cannot decode request", http.StatusBadRequest)
-		fmt.Printf("Cannot decode generate request %v\n", err)
+		log.Debug("could not decode generate request", slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest, "Cannot decode request")
 		return
 	}
 
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
-		http.Error(w, "Prompt is required", http.StatusBadRequest)
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest, "Prompt is required")
 		return
 	}
 	if len(prompt) > maxPromptLen {
-		http.Error(w,
-			fmt.Sprintf("Prompt must be at most %d characters", maxPromptLen),
-			http.StatusBadRequest)
+		writeError(w, r, http.StatusBadRequest, codeInvalidRequest,
+			fmt.Sprintf("Prompt must be at most %d characters", maxPromptLen))
 		return
 	}
 
+	started := time.Now()
 	post, err := service.GenerateAndSavePost(r.Context(), username, prompt)
 	if err != nil {
 		// The upstream message can carry quota and key details, so log it and
 		// return something generic.
-		fmt.Printf("Failed to generate image: %v\n", err)
-		http.Error(w, "Failed to generate image, please try again", http.StatusBadGateway)
+		log.Error("could not generate image",
+			slog.String("username", username), slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusBadGateway, codeUpstreamFailed,
+			"Failed to generate image, please try again")
 		return
 	}
 
-	fmt.Printf("Generated post %s for %s\n", post.Id, username)
+	// Duration is worth recording here specifically: this is the one path that
+	// spends money per call, so a latency change is also a cost signal.
+	log.Info("image generated",
+		slog.String("post_id", post.Id),
+		slog.String("username", username),
+		slog.Int64("duration_ms", time.Since(started).Milliseconds()))
 	writeJSON(w, http.StatusOK, post)
 }

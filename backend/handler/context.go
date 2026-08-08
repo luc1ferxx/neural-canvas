@@ -2,7 +2,7 @@ package handler
 
 import (
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"net/http"
 
 	jwt "github.com/form3tech-oss/jwt-go"
@@ -35,8 +35,9 @@ func usernameFromContext(r *http.Request) (string, bool) {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	body, err := json.Marshal(v)
 	if err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		fmt.Printf("Failed to encode response %v\n", err)
+		slog.Error("could not encode response", slog.String("cause", err.Error()))
+		http.Error(w, `{"error":{"code":"internal","message":"Failed to encode response"}}`,
+			http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

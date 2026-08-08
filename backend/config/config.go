@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -21,6 +22,9 @@ type Config struct {
 
 	AllowedOrigins []string
 	Port           string
+
+	// LogLevel is the minimum severity that gets emitted. Defaults to info.
+	LogLevel slog.Level
 }
 
 // C is the process-wide config, valid only after a successful Load.
@@ -87,6 +91,17 @@ func Load() error {
 		if o == "*" {
 			return fmt.Errorf(`ALLOWED_ORIGINS must not contain "*": these endpoints are authenticated, ` +
 				`list your frontend origins explicitly`)
+		}
+	}
+
+	// slog.Level parses its own text, so "debug", "info", "warn" and "error" are
+	// accepted without a lookup table here. An unrecognised value is rejected
+	// rather than silently defaulting, because a typo would otherwise be
+	// discovered only by noticing that expected log lines never appear.
+	C.LogLevel = slog.LevelInfo
+	if raw := strings.TrimSpace(os.Getenv("LOG_LEVEL")); raw != "" {
+		if err := C.LogLevel.UnmarshalText([]byte(raw)); err != nil {
+			return fmt.Errorf("LOG_LEVEL %q is not one of debug, info, warn, error", raw)
 		}
 	}
 
