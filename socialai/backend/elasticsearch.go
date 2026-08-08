@@ -1,21 +1,21 @@
 package backend
 
 import (
-    "context"
-    "fmt"
+	"context"
+	"fmt"
 
-    "socialai/config"
-    "socialai/constants"
+	"socialai/config"
+	"socialai/constants"
 
-    "github.com/olivere/elastic/v7"
+	"github.com/olivere/elastic/v7"
 )
 
 var (
-    ESBackend *ElasticsearchBackend
+	ESBackend *ElasticsearchBackend
 )
 
 type ElasticsearchBackend struct {
-    client *elastic.Client
+	client *elastic.Client
 }
 
 const postMapping = `{
@@ -47,71 +47,71 @@ const userMapping = `{
 // InitElasticsearchBackend connects and ensures both indexes exist. It returns
 // an error rather than panicking so main can report a usable message and exit.
 func InitElasticsearchBackend() error {
-    client, err := elastic.NewClient(
-        elastic.SetURL(config.C.ESURL),
-        elastic.SetBasicAuth(config.C.ESUsername, config.C.ESPassword),
-        // Sniffing asks the cluster for its node list and then talks to the
-        // addresses it reports. Behind a managed endpoint or a NAT those
-        // addresses are unreachable from here, and the client fails at startup.
-        elastic.SetSniff(false),
-    )
-    if err != nil {
-        return fmt.Errorf("connect to elasticsearch at %s: %w", config.C.ESURL, err)
-    }
+	client, err := elastic.NewClient(
+		elastic.SetURL(config.C.ESURL),
+		elastic.SetBasicAuth(config.C.ESUsername, config.C.ESPassword),
+		// Sniffing asks the cluster for its node list and then talks to the
+		// addresses it reports. Behind a managed endpoint or a NAT those
+		// addresses are unreachable from here, and the client fails at startup.
+		elastic.SetSniff(false),
+	)
+	if err != nil {
+		return fmt.Errorf("connect to elasticsearch at %s: %w", config.C.ESURL, err)
+	}
 
-    if err := ensureIndex(client, constants.POST_INDEX, postMapping); err != nil {
-        return err
-    }
-    if err := ensureIndex(client, constants.USER_INDEX, userMapping); err != nil {
-        return err
-    }
+	if err := ensureIndex(client, constants.POST_INDEX, postMapping); err != nil {
+		return err
+	}
+	if err := ensureIndex(client, constants.USER_INDEX, userMapping); err != nil {
+		return err
+	}
 
-    ESBackend = &ElasticsearchBackend{client: client}
-    return nil
+	ESBackend = &ElasticsearchBackend{client: client}
+	return nil
 }
 
 func ensureIndex(client *elastic.Client, index, mapping string) error {
-    exists, err := client.IndexExists(index).Do(context.Background())
-    if err != nil {
-        return fmt.Errorf("check index %q: %w", index, err)
-    }
-    if exists {
-        return nil
-    }
-    if _, err := client.CreateIndex(index).Body(mapping).Do(context.Background()); err != nil {
-        return fmt.Errorf("create index %q: %w", index, err)
-    }
-    return nil
+	exists, err := client.IndexExists(index).Do(context.Background())
+	if err != nil {
+		return fmt.Errorf("check index %q: %w", index, err)
+	}
+	if exists {
+		return nil
+	}
+	if _, err := client.CreateIndex(index).Body(mapping).Do(context.Background()); err != nil {
+		return fmt.Errorf("create index %q: %w", index, err)
+	}
+	return nil
 }
 
 func (backend *ElasticsearchBackend) ReadFromES(query elastic.Query, index string) (*elastic.SearchResult, error) {
-    searchResult, err := backend.client.Search().
-        Index(index).
-        Query(query).
-        Pretty(true).
-        Do(context.Background())
-    if err != nil {
-        return nil, err
-    }
+	searchResult, err := backend.client.Search().
+		Index(index).
+		Query(query).
+		Pretty(true).
+		Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
 
-    return searchResult, nil
+	return searchResult, nil
 }
 
 func (backend *ElasticsearchBackend) DeleteFromES(query elastic.Query, index string) error {
-    _, err := backend.client.DeleteByQuery().
-        Index(index).
-        Query(query).
-        Pretty(true).
-        Do(context.Background())
+	_, err := backend.client.DeleteByQuery().
+		Index(index).
+		Query(query).
+		Pretty(true).
+		Do(context.Background())
 
-    return err
+	return err
 }
 
 func (backend *ElasticsearchBackend) SaveToES(i interface{}, index string, id string) error {
-    _, err := backend.client.Index().
-        Index(index).
-        Id(id).
-        BodyJson(i).
-        Do(context.Background())
-    return err
+	_, err := backend.client.Index().
+		Index(index).
+		Id(id).
+		BodyJson(i).
+		Do(context.Background())
+	return err
 }
