@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -51,6 +52,28 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	if len(prompt) > maxPromptLen {
 		writeError(w, r, http.StatusBadRequest, codeInvalidRequest,
 			fmt.Sprintf("Prompt must be at most %d characters", maxPromptLen))
+		return
+	}
+
+	// Checked before the call, not after: DALL-E bills per image, so an
+	// unmetered endpoint lets one account drain the balance for everyone.
+	if err := service.ReserveGeneration(r.Context(), username); err != nil {
+		if errors.Is(err, service.ErrQuotaExceeded) {
+			log.Warn("generation quota exceeded", slog.String("username", username))
+			writeError(w, r, http.StatusTooManyRequests, codeQuotaExceeded,
+				fmt.Sprintf("You have used your %d generations for today, try again later",
+					service.MaxGenerationsPerDay))
+			return
+		}
+		// The quota store is unreachable. Refuse rather than fail open: failing
+		// open on a spending limit means an outage in Elasticsearch becomes an
+		// unbounded OpenAI bill. This is the opposite call from the login
+		// throttle, where failing open only risks brute-force attempts that the
+		// credential check still has to pass.
+		log.Error("could not check generation quota",
+			slog.String("username", username), slog.String("cause", err.Error()))
+		writeError(w, r, http.StatusServiceUnavailable, codeUnavailable,
+			"Cannot verify your remaining quota, please try again shortly")
 		return
 	}
 

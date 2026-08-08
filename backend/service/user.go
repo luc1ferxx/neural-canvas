@@ -73,15 +73,17 @@ func CheckUser(ctx context.Context, username, password string) (bool, error) {
 
 // AddUser hashes the password and stores the user. Returns ErrUserExists if the
 // username is taken.
+//
+// Uniqueness is enforced by the write itself, not by a preceding read. The
+// previous implementation checked with getUser and then indexed, and Elasticsearch
+// has no unique constraint to make that safe: two concurrent signups for the same
+// name both saw "not found", both proceeded, and the second silently overwrote the
+// first -- leaving the earlier user unable to log in with a password that had been
+// replaced by someone else's.
+//
+// Documents are keyed by username, so a create-only write is atomic and closes
+// the window entirely. It also costs one round trip instead of two.
 func AddUser(ctx context.Context, user *model.User) error {
-	_, found, err := getUser(ctx, user.Username)
-	if err != nil {
-		return err
-	}
-	if found {
-		return ErrUserExists
-	}
-
 	hashed, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("hash password: %w", err)
@@ -92,7 +94,11 @@ func AddUser(ctx context.Context, user *model.User) error {
 	toStore := *user
 	toStore.Password = string(hashed)
 
-	if err := store.ESBackend.SaveToES(ctx, &toStore, constants.USER_INDEX, toStore.Username); err != nil {
+	if err := store.ESBackend.CreateDocument(
+		ctx, &toStore, constants.USER_INDEX, toStore.Username); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			return ErrUserExists
+		}
 		return err
 	}
 

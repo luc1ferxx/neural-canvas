@@ -208,6 +208,37 @@ Failed sign-ins are throttled per username: 5 attempts per 15 minutes. Counters
 live in Elasticsearch and are incremented by a Painless script, so the increment
 is atomic and the limit is shared rather than per-instance.
 
+Signups enforce uniqueness with a create-only write (`op_type=create`) rather than
+a read followed by a write. Elasticsearch has no unique constraint, so the old
+check-then-index left a window: measured against the reverted implementation, up
+to 6 of 8 concurrent signups for the same name all "succeeded", and the last write
+won — leaving the earlier registrants holding a password that had been replaced by
+someone else's.
+
+### Cost control
+
+`/generate` is the only endpoint that spends money: DALL-E bills per image. It is
+capped at 20 generations per user per rolling 24 hours, on the same Elasticsearch
+counter as the login throttle but in its own index — sharing one would mean a
+successful sign-in, which clears login failures, also handed back a fresh spending
+allowance.
+
+The count is incremented *before* the call, which is the opposite of the login
+throttle. A failure occurring after OpenAI has been reached has still been billed,
+so counting only successes would let a caller whose prompt reliably fails
+downstream spend without limit. This over-charges by the number of genuine internal
+failures, which is the cheaper mistake.
+
+It is check-then-increment, so a simultaneous burst can overshoot by roughly the
+concurrency. The increment itself is atomic, so the overshoot is bounded and small.
+For a spending cap, "20, occasionally 22" is a different thing from "unbounded".
+
+If the quota store is unreachable the request is refused, not allowed through. That
+is also the opposite of the login throttle, which fails open: failing open on a
+brute-force limiter still leaves the attacker facing the credential check, whereas
+failing open on a spending limit turns an Elasticsearch outage into an unbounded
+OpenAI bill.
+
 ### Media handling
 
 Uploads are capped at 32 MiB and typed by inspecting their leading bytes, not by

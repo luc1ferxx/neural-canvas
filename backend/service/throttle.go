@@ -2,11 +2,9 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/luc1ferxx/neural-canvas/backend/constants"
-	"github.com/luc1ferxx/neural-canvas/backend/store"
 )
 
 const (
@@ -16,28 +14,9 @@ const (
 	LoginWindow = 15 * time.Minute
 )
 
-// loginAttempt is the stored counter for one username.
-type loginAttempt struct {
-	Failures     int   `json:"failures"`
-	FirstAttempt int64 `json:"firstAttempt"`
-}
-
-// incrementScript adds one to the failure count, restarting the count when the
-// window has elapsed.
-//
-// This runs inside Elasticsearch so the increment is atomic. Doing the same in
-// Go would be a read, a decision and a write, and two simultaneous attempts
-// would each read the same value and one increment would be lost -- which is
-// exactly the gap an attacker parallelises.
-const incrementScript = `
-if (ctx._source.firstAttempt == null ||
-    params.now - ctx._source.firstAttempt > params.window) {
-  ctx._source.failures = 1;
-  ctx._source.firstAttempt = params.now;
-} else {
-  ctx._source.failures += 1;
-}
-`
+// loginAttempt is an alias of the shared counter type. Kept as a name because the
+// stored document is the same shape and the integration test asserts on it.
+type loginAttempt = counter
 
 // LoginAllowed reports whether username may attempt a sign-in.
 //
@@ -51,50 +30,19 @@ if (ctx._source.firstAttempt == null ||
 // X-Forwarded-For, and the latter is trivially varied to defeat an IP-keyed
 // limiter.
 func LoginAllowed(ctx context.Context, username string) (bool, error) {
-	var attempt loginAttempt
-	found, err := store.ESBackend.GetDocument(
-		ctx, constants.LOGIN_ATTEMPT_INDEX, username, &attempt)
+	failures, err := countWithin(ctx, constants.LOGIN_ATTEMPT_INDEX, username, LoginWindow)
 	if err != nil {
 		return false, err
 	}
-	if !found {
-		return true, nil
-	}
-
-	// Expired window: the next recorded failure restarts the count.
-	if time.Now().Unix()-attempt.FirstAttempt > int64(LoginWindow.Seconds()) {
-		return true, nil
-	}
-
-	return attempt.Failures < MaxLoginFailures, nil
+	return failures < MaxLoginFailures, nil
 }
 
 // RecordLoginFailure counts one failed sign-in.
 func RecordLoginFailure(ctx context.Context, username string) error {
-	now := time.Now().Unix()
-
-	return store.ESBackend.UpdateWithScript(
-		ctx,
-		constants.LOGIN_ATTEMPT_INDEX,
-		username,
-		incrementScript,
-		map[string]interface{}{
-			"now":    now,
-			"window": int64(LoginWindow.Seconds()),
-		},
-		// Used when no counter exists yet; the script does not run in that case.
-		map[string]interface{}{
-			"failures":     1,
-			"firstAttempt": now,
-		},
-	)
+	return recordEvent(ctx, constants.LOGIN_ATTEMPT_INDEX, username, LoginWindow)
 }
 
 // ClearLoginFailures resets the counter after a successful sign-in.
 func ClearLoginFailures(ctx context.Context, username string) error {
-	if err := store.ESBackend.DeleteDocument(
-		ctx, constants.LOGIN_ATTEMPT_INDEX, username); err != nil {
-		return fmt.Errorf("clear login failures for %q: %w", username, err)
-	}
-	return nil
+	return resetCounter(ctx, constants.LOGIN_ATTEMPT_INDEX, username)
 }

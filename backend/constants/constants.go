@@ -24,4 +24,10 @@ const (
 	// POST_INDEX_LEGACY is the pre-migration index, read only by the reindex
 	// command.
 	POST_INDEX_LEGACY = "post"
+
+	// GENERATION_QUOTA_INDEX holds per-user image-generation counts, keyed by
+	// username. Separate from LOGIN_ATTEMPT_INDEX because the two have different
+	// windows and different meanings, and sharing one index would make a
+	// successful sign-in reset someone's spending allowance.
+	GENERATION_QUOTA_INDEX = "generation_quota"
 )

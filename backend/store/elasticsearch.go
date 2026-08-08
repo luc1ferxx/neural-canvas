@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -55,9 +56,10 @@ const userMapping = `{
     }
 }`
 
-// loginAttemptMapping stores failed sign-in counters. Nothing queries these
-// fields; they are read by document id.
-const loginAttemptMapping = `{
+// counterMapping stores windowed event counters -- failed sign-ins, and image
+// generations charged against a user's quota. Nothing queries these fields; they
+// are read by document id.
+const counterMapping = `{
     "mappings": {
         "properties": {
             "failures":     { "type": "long", "index": false },
@@ -87,7 +89,8 @@ func InitElasticsearchBackend(ctx context.Context) error {
 	}{
 		{constants.POST_INDEX, postMapping},
 		{constants.USER_INDEX, userMapping},
-		{constants.LOGIN_ATTEMPT_INDEX, loginAttemptMapping},
+		{constants.LOGIN_ATTEMPT_INDEX, counterMapping},
+		{constants.GENERATION_QUOTA_INDEX, counterMapping},
 	} {
 		if err := ensureIndex(ctx, client, idx.name, idx.mapping); err != nil {
 			return err
@@ -390,6 +393,44 @@ func (backend *ElasticsearchBackend) DeleteDocument(ctx context.Context, index, 
 			return nil
 		}
 		return fmt.Errorf("delete %q from %q: %w", id, index, err)
+	}
+	return nil
+}
+
+// ErrConflict reports that a document with this id already exists. Returned only
+// by CreateDocument.
+var ErrConflict = errors.New("document already exists")
+
+// CreateDocument indexes a document only if its id is not already taken,
+// returning ErrConflict if it is.
+//
+// This is op_type=create, which Elasticsearch evaluates atomically. SaveToES is
+// an upsert and cannot express "only if absent", so enforcing uniqueness with it
+// requires a read followed by a write -- and between those two steps a second
+// request can pass the same check, so both proceed and the later write silently
+// replaces the earlier one. For a user document that means one account
+// overwriting another's credentials.
+//
+// Elasticsearch has no unique constraint to lean on. Keying the document by the
+// value that must be unique and refusing to create over it is the closest
+// equivalent, and unlike the read-then-write it has no window.
+func (backend *ElasticsearchBackend) CreateDocument(ctx context.Context, i interface{}, index string, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, esWriteTimeout)
+	defer cancel()
+
+	_, err := backend.client.Index().
+		Index(index).
+		Id(id).
+		OpType("create").
+		BodyJson(i).
+		Refresh("wait_for").
+		Do(ctx)
+	if err != nil {
+		// 409 is the expected outcome for a taken id, not a failure.
+		if elastic.IsConflict(err) {
+			return ErrConflict
+		}
+		return fmt.Errorf("create %q in %q: %w", id, index, err)
 	}
 	return nil
 }

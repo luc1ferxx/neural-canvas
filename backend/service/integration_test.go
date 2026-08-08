@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -272,6 +273,224 @@ func TestIntegrationRevokingUnknownUserIsHarmless(t *testing.T) {
 
 	if err := RevokeTokens(ctx, uniqueName("ghost")); err != nil {
 		t.Errorf("RevokeTokens() on a missing user returned %v, want nil", err)
+	}
+}
+
+// TestIntegrationConcurrentSignupCreatesOneAccount is the race that read-then-write
+// could not close.
+//
+// The old AddUser called getUser and then indexed. Elasticsearch has no unique
+// constraint, and the index operation was an upsert, so N concurrent signups for
+// the same name all saw "not found", all proceeded, and the last write won. The
+// earlier registrant was left with someone else's password on their account.
+//
+// Exactly one caller must succeed and the rest must see ErrUserExists. The stored
+// password must be the winner's, and the account must actually be usable -- a
+// half-created user that nobody can log into would satisfy a weaker assertion.
+func TestIntegrationConcurrentSignupCreatesOneAccount(t *testing.T) {
+	ctx := setupIntegration(t)
+
+	username := uniqueName("racecondition")
+
+	// This is a probabilistic guard, not a proof, and it is worth being precise
+	// about which. Measured against a deliberately reverted AddUser, it detected
+	// the overwrite in 5 of 6 runs at 8 contenders and 5 of 6 again at 24 --
+	// raising concurrency does not help, because what decides it is whether
+	// Elasticsearch's realtime GET happens to pick up the first write before the
+	// others read. So roughly one run in six would let a regression through here.
+	//
+	// The deterministic half of the guarantee is
+	// TestIntegrationCreateDocumentRejectsADuplicate, which pins the primitive this
+	// depends on: a create-only write over an existing id must fail. That one
+	// cannot pass if the atomicity is lost.
+	const attempts = 8
+
+	// Each contender uses a distinguishable password, so it is possible to tell
+	// which one landed rather than merely counting outcomes.
+	passwords := make([]string, attempts)
+	for i := range passwords {
+		passwords[i] = fmt.Sprintf("password-from-caller-%d", i)
+	}
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		created int
+		exists  int
+		other   []error
+	)
+
+	// A start gate, so the goroutines contend rather than being serialised by
+	// however long each one takes to spin up.
+	gate := make(chan struct{})
+
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(pw string) {
+			defer wg.Done()
+			<-gate
+
+			err := AddUser(ctx, &model.User{Username: username, Password: pw})
+
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				created++
+			case errors.Is(err, ErrUserExists):
+				exists++
+			default:
+				other = append(other, err)
+			}
+		}(passwords[i])
+	}
+
+	close(gate)
+	wg.Wait()
+
+	for _, err := range other {
+		t.Errorf("unexpected error from AddUser: %v", err)
+	}
+
+	if created != 1 {
+		t.Errorf("%d callers created the account, want exactly 1: "+
+			"concurrent signups are overwriting each other", created)
+	}
+	if exists != attempts-1 {
+		t.Errorf("%d callers saw ErrUserExists, want %d", exists, attempts-1)
+	}
+
+	// Exactly one of the passwords must work, and the account must be usable.
+	working := 0
+	for _, pw := range passwords {
+		ok, err := CheckUser(ctx, username, pw)
+		if err != nil {
+			t.Fatalf("CheckUser(): %v", err)
+		}
+		if ok {
+			working++
+		}
+	}
+	if working != 1 {
+		t.Errorf("%d of the %d passwords work, want exactly 1: the account is not "+
+			"in a single consistent state", working, attempts)
+	}
+}
+
+// TestIntegrationCreateDocumentRejectsADuplicate covers the store primitive
+// directly, separately from the signup flow that uses it.
+func TestIntegrationCreateDocumentRejectsADuplicate(t *testing.T) {
+	ctx := setupIntegration(t)
+
+	id := uniqueName("dupe-doc")
+	doc := model.Post{Id: id, User: "someone", Message: "first", Type: "image",
+		Url: "https://example.invalid/a.png"}
+
+	if err := store.ESBackend.CreateDocument(ctx, &doc, constants.POST_INDEX, id); err != nil {
+		t.Fatalf("first CreateDocument(): %v", err)
+	}
+
+	second := doc
+	second.Message = "second"
+	err := store.ESBackend.CreateDocument(ctx, &second, constants.POST_INDEX, id)
+	if !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("second CreateDocument() = %v, want store.ErrConflict", err)
+	}
+
+	// The original must be untouched: a rejected create must not be a partial write.
+	var stored model.Post
+	found, err := store.ESBackend.GetDocument(ctx, constants.POST_INDEX, id, &stored)
+	if err != nil || !found {
+		t.Fatalf("GetDocument(): found=%v err=%v", found, err)
+	}
+	if stored.Message != "first" {
+		t.Errorf("message = %q, want %q: the rejected create modified the document",
+			stored.Message, "first")
+	}
+}
+
+// TestIntegrationGenerationQuotaStopsSpending is the test that matters for cost.
+// /generate bills OpenAI per call, so an unmetered endpoint lets one account
+// drain the balance for every user.
+func TestIntegrationGenerationQuotaStopsSpending(t *testing.T) {
+	ctx := setupIntegration(t)
+
+	username := uniqueName("spender")
+
+	remaining, err := GenerationsRemaining(ctx, username)
+	if err != nil {
+		t.Fatalf("GenerationsRemaining() on a fresh user: %v", err)
+	}
+	if remaining != MaxGenerationsPerDay {
+		t.Errorf("a fresh user has %d generations, want %d", remaining, MaxGenerationsPerDay)
+	}
+
+	for i := 1; i <= MaxGenerationsPerDay; i++ {
+		if err := ReserveGeneration(ctx, username); err != nil {
+			t.Fatalf("ReserveGeneration() #%d of %d: %v", i, MaxGenerationsPerDay, err)
+		}
+	}
+
+	// The allowance is spent; the next attempt must be refused rather than
+	// forwarded to a paid API.
+	if err := ReserveGeneration(ctx, username); !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("ReserveGeneration() past the limit = %v, want ErrQuotaExceeded", err)
+	}
+
+	remaining, err = GenerationsRemaining(ctx, username)
+	if err != nil {
+		t.Fatalf("GenerationsRemaining(): %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("remaining = %d after exhausting the quota, want 0", remaining)
+	}
+}
+
+// TestIntegrationQuotaCountsAreIsolatedPerUser guards the obvious way to get this
+// wrong: one shared counter, so the first heavy user locks out everyone.
+func TestIntegrationQuotaCountsAreIsolatedPerUser(t *testing.T) {
+	ctx := setupIntegration(t)
+
+	heavy := uniqueName("heavy")
+	light := uniqueName("light")
+
+	for i := 0; i < MaxGenerationsPerDay; i++ {
+		if err := ReserveGeneration(ctx, heavy); err != nil {
+			t.Fatalf("ReserveGeneration(heavy) #%d: %v", i+1, err)
+		}
+	}
+
+	if err := ReserveGeneration(ctx, heavy); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("the heavy user was not stopped: %v", err)
+	}
+	if err := ReserveGeneration(ctx, light); err != nil {
+		t.Errorf("a different user was blocked by someone else's usage: %v", err)
+	}
+}
+
+// TestIntegrationSigningInDoesNotResetTheSpendingQuota is why the quota has its
+// own index rather than sharing the login-throttle one. With a shared index, a
+// successful sign-in -- which clears login failures -- would also hand back a
+// fresh allowance, making the cap trivially bypassable by logging out and in.
+func TestIntegrationSigningInDoesNotResetTheSpendingQuota(t *testing.T) {
+	ctx := setupIntegration(t)
+
+	username := uniqueName("cycler")
+
+	for i := 0; i < MaxGenerationsPerDay; i++ {
+		if err := ReserveGeneration(ctx, username); err != nil {
+			t.Fatalf("ReserveGeneration() #%d: %v", i+1, err)
+		}
+	}
+
+	// Simulate a fresh sign-in.
+	if err := ClearLoginFailures(ctx, username); err != nil {
+		t.Fatalf("ClearLoginFailures(): %v", err)
+	}
+
+	if err := ReserveGeneration(ctx, username); !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("signing in restored the generation quota (got %v); the cap can be "+
+			"bypassed by signing out and back in", err)
 	}
 }
 
