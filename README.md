@@ -59,10 +59,11 @@ If you have five minutes and want the parts worth reviewing:
 | [`backend/service/quota.go`](backend/service/quota.go) | Per-user spend limit that fails **closed**, next to a login throttle that fails **open** — opposite calls, both argued |
 | [`backend/store/gcs_integration_test.go`](backend/store/gcs_integration_test.go) | Tests that were mutation-tested; three of them were wrong the first time, and the comments say how |
 | [`backend/handler/errors.go`](backend/handler/errors.go) | One JSON error envelope with stable codes and the request id, including for the JWT library's own rejections |
-| [`backend/store/elasticsearch.go`](backend/store/elasticsearch.go) | The connection pool, and the measurements that explain why the default was a bug |
 | [`docker-compose.yml`](docker-compose.yml) | The offline stack, and three emulator defaults that are load-bearing in non-obvious ways |
+| [`backend/store/elasticsearch.go`](backend/store/elasticsearch.go) | The connection pool, and the measurements that explain why the default was a bug |
 | [`backend/handler/metrics.go`](backend/handler/metrics.go) | Why the metrics wrap the router instead of using `router.Use`, and what that fixed |
 | [`scripts/loadtest.sh`](scripts/loadtest.sh) | One load test used for both the README's numbers and CI's regression gate |
+| [`backend/handler/openapi_test.go`](backend/handler/openapi_test.go) | Tests that hold a hand-written OpenAPI spec to the real router, including that documented auth matches the middleware |
 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Unit, lint, integration against real Elasticsearch and a storage emulator, plus a job that boots the compose stack, drives a request end to end and load tests it |
 
 ## Project Structure
@@ -85,6 +86,7 @@ If you have five minutes and want the parts worth reviewing:
 │   ├── config/        # environment-driven configuration
 │   ├── logging/       # structured logging, request ids
 │   ├── metrics/       # Prometheus instruments, in one file so cardinality is reviewable
+│   ├── openapi.yaml   # the API contract; tests hold it to the real router
 │   ├── Dockerfile     # static binary, non-root, distroless-ish alpine
 │   ├── .env.example
 │   └── go.mod
@@ -207,6 +209,39 @@ image tag, a healthcheck calling a binary the image does not ship, or an emulato
 default that turns out to be load-bearing all look exactly like a working file.
 
 ### Endpoints
+
+The full contract is [`backend/openapi.yaml`](backend/openapi.yaml) — OpenAPI 3,
+every endpoint, every error code, the auth scheme and the request/response
+schemas. Paste it into [editor.swagger.io](https://editor.swagger.io/) to browse
+it, or generate a client from it.
+
+It is hand-written, which is the choice worth defending. Generating it from
+annotations would keep it mechanically in step with the code, but a description
+that cannot disagree with the implementation also cannot record an intent — that
+`/signin` returns the same message for a bad username as for a bad password *on
+purpose*, for instance.
+
+The risk with a hand-written spec is that it rots, and a spec nobody trusts is
+worse than none. So five tests in
+[`backend/handler/openapi_test.go`](backend/handler/openapi_test.go) hold it to
+the code, running in the normal `go test ./...` with no extra tooling:
+
+- the document validates against the OpenAPI 3 meta-schema;
+- every route the router serves is described — it walks the real route table, so a
+  new endpoint cannot ship undocumented;
+- every documented path resolves to a real route, method included;
+- **every operation's `security` matches what the middleware does** — an endpoint
+  documented as public that answers 401, or one documented as protected that does
+  not, fails the build. Getting that backwards in a spec is worse than omitting
+  it;
+- the documented error-code enum matches the constants the handlers can emit, and
+  a real error response is validated against the documented envelope schema.
+
+All five were mutation-tested. One of them passed a mutation it should have
+caught: `mux.Router.Match` returns `true` for a path that matches nothing when a
+`NotFoundHandler` is set — it found *a handler*, just not a route — so the test
+accepted an endpoint the spec had invented. It now checks `match.Route`, which is
+the honest signal.
 
 | Method | Path | Auth | Purpose |
 |---|---|---|---|

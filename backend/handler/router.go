@@ -14,7 +14,49 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// InitRouter builds the API handler: the routes, wrapped in the middleware chain.
 func InitRouter() http.Handler {
+	router := apiRouter()
+
+	// Explicit origins from config, never "*". These endpoints require an
+	// Authorization header, so a wildcard would let any site drive the API on
+	// behalf of a user whose token it managed to obtain.
+	originsOk := handlers.AllowedOrigins(config.C.AllowedOrigins)
+	headersOk := handlers.AllowedHeaders([]string{"Authorization", "Content-Type", requestIDHeader})
+	methodsOk := handlers.AllowedMethods([]string{"GET", "POST", "DELETE"})
+	// Exposed so a browser client can read the id off a failed response and
+	// include it in a bug report; without this the header is invisible to JS.
+	exposedOk := handlers.ExposedHeaders([]string{requestIDHeader})
+
+	// Ordering, outermost first:
+	//
+	//   instrument    outside everything, so the metrics count every request that
+	//                 reached the process -- including the ones that match no route,
+	//                 which mux middleware never sees, and the ones CORS rejects
+	//                 before the router is consulted. A spike in either is
+	//                 something worth being able to see.
+	//   CORS          rejects a disallowed origin before any work is done
+	//   withRequestID every entry below this point carries the id, including the
+	//                 access log and any panic
+	//   accessLog     outside recoverPanic, so a panic is still recorded as the
+	//                 500 the client actually received
+	//   recoverPanic  closest to the handlers, which are what can panic
+	return instrument(router)(
+		handlers.CORS(originsOk, headersOk, methodsOk, exposedOk)(
+			withRequestID(accessLog(recoverPanic(router))),
+		),
+	)
+}
+
+// apiRouter registers every route and returns the bare mux router, without the
+// middleware chain.
+//
+// Separated from InitRouter so a test can walk the route table -- see
+// openapi_test.go, which fails if a route exists that openapi.yaml does not
+// describe. There is no other way to enumerate the routes: InitRouter's return
+// value is the wrapped chain, and the mux router inside it is not reachable
+// through http.Handler.
+func apiRouter() *mux.Router {
 	jwtMw := jwtMiddleware.New(jwtMiddleware.Options{
 		ValidationKeyGetter: func(token *jwt.Token) (interface{}, error) {
 			return config.C.JWTSecret, nil
@@ -65,32 +107,5 @@ func InitRouter() http.Handler {
 	router.Handle("/signup", http.HandlerFunc(signupHandler)).Methods("POST")
 	router.Handle("/signin", http.HandlerFunc(signinHandler)).Methods("POST")
 
-	// Explicit origins from config, never "*". These endpoints require an
-	// Authorization header, so a wildcard would let any site drive the API on
-	// behalf of a user whose token it managed to obtain.
-	originsOk := handlers.AllowedOrigins(config.C.AllowedOrigins)
-	headersOk := handlers.AllowedHeaders([]string{"Authorization", "Content-Type", requestIDHeader})
-	methodsOk := handlers.AllowedMethods([]string{"GET", "POST", "DELETE"})
-	// Exposed so a browser client can read the id off a failed response and
-	// include it in a bug report; without this the header is invisible to JS.
-	exposedOk := handlers.ExposedHeaders([]string{requestIDHeader})
-
-	// Ordering, outermost first:
-	//
-	//   instrument    outside everything, so the metrics count every request that
-	//                 reached the process -- including the ones that match no route,
-	//                 which mux middleware never sees, and the ones CORS rejects
-	//                 before the router is consulted. A spike in either is
-	//                 something worth being able to see.
-	//   CORS          rejects a disallowed origin before any work is done
-	//   withRequestID every entry below this point carries the id, including the
-	//                 access log and any panic
-	//   accessLog     outside recoverPanic, so a panic is still recorded as the
-	//                 500 the client actually received
-	//   recoverPanic  closest to the handlers, which are what can panic
-	return instrument(router)(
-		handlers.CORS(originsOk, headersOk, methodsOk, exposedOk)(
-			withRequestID(accessLog(recoverPanic(router))),
-		),
-	)
+	return router
 }
