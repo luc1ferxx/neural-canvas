@@ -50,6 +50,18 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # go vet is a floor, not a ceiling: it passed on an == comparison against a
+      # wrapped sentinel error and on a server with no header-read timeout.
+      # Config and rationale live in backend/.golangci.yml.
+      #
+      # working-directory has to be set on the action itself -- the job's
+      # `defaults.run` only applies to `run:` steps, not to `uses:` steps.
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+          working-directory: backend
+
       - name: Test
         run: go test -race -count=1 ./...
 

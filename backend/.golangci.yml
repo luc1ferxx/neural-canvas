@@ -1,0 +1,35 @@
+version: "2"
+
+# go vet alone missed real problems in this codebase: a sentinel error compared
+# with == instead of errors.Is (which silently stops matching the moment the
+# library wraps it), unchecked Close errors, and a server with no header-read
+# timeout. Each linter below is here because it found something, not on
+# principle.
+linters:
+  default: none
+  enable:
+    # golangci-lint's own defaults.
+    - errcheck # unchecked error returns
+    - govet # same analyzers as `go vet`
+    - ineffassign # assignments never read
+    - staticcheck # correctness and simplification
+    - unused # dead identifiers
+
+    # Added deliberately.
+    - bodyclose # leaked HTTP response bodies -- this backend calls DALL-E twice
+    - errorlint # == on errors instead of errors.Is; found 3 real cases
+    - gosec # security; found the missing ReadHeaderTimeout
+    - nilerr # returning nil after checking err != nil
+    - unconvert # redundant type conversions
+    - copyloopvar # loop-variable copies made obsolete by Go 1.22
+
+  exclusions:
+    rules:
+      # gosec's threat model is production code. Test fixtures here build
+      # deliberately odd byte sequences -- an ISO-BMFF box with a hand-computed
+      # size, a truncated header -- and its integer-overflow rule fires on the
+      # arithmetic that constructs them. Excluding it in tests keeps the
+      # production findings meaningful instead of buried.
+      - path: _test\.go
+        linters:
+          - gosec

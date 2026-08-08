@@ -61,7 +61,18 @@ go run .
 ```bash
 go build ./...            # compile
 go vet ./...              # static checks
+golangci-lint run ./...   # linters; config in .golangci.yml
 go test ./...             # unit tests
+```
+
+`go vet` is the floor. The linter set in `.golangci.yml` caught three sentinel
+errors compared with `==` rather than `errors.Is` — including one in the GCS
+delete path, where a wrapped `ErrObjectNotExist` would have made an
+already-deleted object look like a failure and left the post undeletable — plus
+a server started without a header-read timeout. Install it with:
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 ```
 
 Integration tests run against a real Elasticsearch and skip unless `ES_TEST_URL`

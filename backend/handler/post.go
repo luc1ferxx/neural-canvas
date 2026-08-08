@@ -33,7 +33,10 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("Media file is not available %v\n", err)
 		return
 	}
-	defer file.Close()
+	// Close on a read is discarded deliberately: it reports nothing actionable.
+	// The write-side Close in store.SaveToGCS is checked, because that is where
+	// a Close error means the upload did not land.
+	defer func() { _ = file.Close() }()
 
 	// Type comes from the bytes, not from the filename extension. A client can
 	// name an HTML page "cat.jpg", and every object in the bucket is public.

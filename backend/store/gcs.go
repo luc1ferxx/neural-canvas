@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -85,7 +86,7 @@ func (backend *GoogleCloudStorageBackend) DeleteFromGCS(objectName string) error
 	ctx := context.Background()
 
 	err := backend.client.Bucket(backend.bucket).Object(objectName).Delete(ctx)
-	if err == storage.ErrObjectNotExist {
+	if errors.Is(err, storage.ErrObjectNotExist) {
 		return nil
 	}
 	if err != nil {

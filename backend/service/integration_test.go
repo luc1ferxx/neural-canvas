@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -145,7 +146,7 @@ func TestIntegrationDuplicateSignupRejected(t *testing.T) {
 	if err := AddUser(&user); err != nil {
 		t.Fatalf("first AddUser(): %v", err)
 	}
-	if err := AddUser(&user); err != ErrUserExists {
+	if err := AddUser(&user); !errors.Is(err, ErrUserExists) {
 		t.Errorf("second AddUser() = %v, want ErrUserExists", err)
 	}
 }

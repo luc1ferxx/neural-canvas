@@ -116,7 +116,7 @@ func generateImageURL(ctx context.Context, prompt string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("call openai: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Cap the response so a misbehaving upstream cannot stream unbounded data.
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -157,7 +157,7 @@ func downloadImage(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("download generated image: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download generated image: status %d", resp.StatusCode)
