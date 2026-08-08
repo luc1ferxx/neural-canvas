@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
@@ -70,6 +71,50 @@ const counterMapping = `{
     }
 }`
 
+// esMaxConnsPerHost bounds how many TCP connections this process will hold open
+// to Elasticsearch, and -- because the idle limit is set to the same number --
+// how many it will keep for reuse.
+//
+// The default was the problem. olivere/elastic falls back to http.DefaultClient,
+// whose transport keeps only MaxIdleConnsPerHost = 2 connections per host. Two is
+// fine while requests arrive one at a time, and it is why this went unnoticed:
+// every functional test passes, and so does any manual use. Under concurrency it
+// means the third simultaneous query opens a fresh TCP connection, and on
+// completion finds the two idle slots taken and closes it again. Every authenticated
+// request makes two Elasticsearch calls -- the session-revocation get, then the
+// query -- so the churn scales with traffic.
+//
+// A load test at 3200 requests/second measured it: 9,529 sockets in TIME_WAIT
+// after 15 seconds, roughly 635 connections created and thrown away per second,
+// while exactly 4 stayed established. p99 was 53.8ms against a 0.4ms median,
+// which is the shape of connection setup rather than of query work. With this
+// pool, the same run holds its connections and the churn goes to nearly nothing.
+//
+// 100 is far more than this service needs -- an Elasticsearch call here takes
+// about 0.2ms, so 100 connections cover far more throughput than a single node
+// will serve -- and the point of the number is to be an explicit ceiling rather
+// than a tuned one. Setting the max equal to the idle limit is deliberate: any
+// gap between them is churn, because a connection above the idle limit is closed
+// on release instead of reused.
+const esMaxConnsPerHost = 100
+
+// esHTTPClient builds the transport used for every Elasticsearch call.
+//
+// No Timeout is set on the http.Client on purpose. Every call site already
+// derives a context with an explicit deadline, and a client-level timeout would
+// silently override those -- including the deliberately longer one used for
+// reindexing.
+func esHTTPClient() *http.Client {
+	// Clone rather than construct, so the proxy, dialer and HTTP/2 settings from
+	// the standard transport are kept and only the pool is changed.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxConnsPerHost = esMaxConnsPerHost
+	transport.MaxIdleConnsPerHost = esMaxConnsPerHost
+	transport.MaxIdleConns = esMaxConnsPerHost
+
+	return &http.Client{Transport: transport}
+}
+
 // InitElasticsearchBackend connects and ensures every index exists. It returns
 // an error rather than panicking so main can report a usable message and exit.
 func InitElasticsearchBackend(ctx context.Context) error {
@@ -80,6 +125,7 @@ func InitElasticsearchBackend(ctx context.Context) error {
 		// addresses it reports. Behind a managed endpoint or a NAT those
 		// addresses are unreachable from here, and the client fails at startup.
 		elastic.SetSniff(false),
+		elastic.SetHttpClient(esHTTPClient()),
 	)
 	if err != nil {
 		return fmt.Errorf("connect to elasticsearch at %s: %w", config.C.ESURL, err)

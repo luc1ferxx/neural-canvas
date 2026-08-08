@@ -291,6 +291,50 @@ jobs:
 
           echo "--- the whole offline path works"
 
+      - name: Install vegeta
+        run: |
+          set -euo pipefail
+          # Pinned rather than "latest": a load test whose generator changes
+          # underneath it cannot be compared with the previous run, and the
+          # thresholds below are calibrated against a known version.
+          version=12.13.0
+          curl -fsSL "https://github.com/tsenart/vegeta/releases/download/v${version}/vegeta_${version}_linux_amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin vegeta
+          vegeta -version || true
+
+      - name: Load test
+        run: |
+          set -euo pipefail
+          # Rates far below the local ones. A GitHub runner has two shared cores
+          # and has to run Elasticsearch, the emulator, the API and the load
+          # generator on them, so anything higher measures the runner. What this
+          # job is for is catching a regression that shows up at any rate: a
+          # non-200, a dropped connection, or latency an order of magnitude out.
+          DURATION=15s \
+          HEALTH_RATE=100 \
+          SEARCH_RATE=50 \
+          SIGNIN_RATE=2 \
+          SEED_POSTS=10 \
+          MAX_P99_MS=3000 \
+          MAX_SIGNIN_P99_MS=8000 \
+          OUT_DIR="$RUNNER_TEMP/loadtest" \
+          ./scripts/loadtest.sh
+
+      - name: Load test summary
+        if: always()
+        run: |
+          # Into the job summary so the numbers are readable without opening logs,
+          # and so two runs can be compared by eye.
+          if [ -f "$RUNNER_TEMP/loadtest/summary.md" ]; then
+            {
+              echo "### Load test"
+              echo
+              echo "Rates are deliberately low; see the note in the workflow."
+              echo
+              cat "$RUNNER_TEMP/loadtest/summary.md"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Stack logs
         if: failure()
         run: docker compose logs --no-color --tail 200

@@ -10,6 +10,12 @@ offline with one command, that the paths which cost money or hold credentials ar
 exercised by tests against real services rather than mocks, and that the trade-offs
 are written down where they were made.
 
+Load testing it found a real bug: the Elasticsearch client was using Go's default
+two-connections-per-host pool, which no functional test could have caught. Sizing
+the pool took p99 on the authenticated read path from 53.8 ms to 1.7 ms and turned
+a 10%-success collapse at 6,400 req/s into 100% success — see
+[Load testing](#load-testing).
+
 ```bash
 docker compose up --build     # Elasticsearch + storage emulator + API + frontend
 open http://localhost:3000    # no cloud account, no API key, no billing
@@ -53,9 +59,11 @@ If you have five minutes and want the parts worth reviewing:
 | [`backend/service/quota.go`](backend/service/quota.go) | Per-user spend limit that fails **closed**, next to a login throttle that fails **open** — opposite calls, both argued |
 | [`backend/store/gcs_integration_test.go`](backend/store/gcs_integration_test.go) | Tests that were mutation-tested; three of them were wrong the first time, and the comments say how |
 | [`backend/handler/errors.go`](backend/handler/errors.go) | One JSON error envelope with stable codes and the request id, including for the JWT library's own rejections |
+| [`backend/store/elasticsearch.go`](backend/store/elasticsearch.go) | The connection pool, and the measurements that explain why the default was a bug |
 | [`docker-compose.yml`](docker-compose.yml) | The offline stack, and three emulator defaults that are load-bearing in non-obvious ways |
 | [`backend/handler/metrics.go`](backend/handler/metrics.go) | Why the metrics wrap the router instead of using `router.Use`, and what that fixed |
-| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Unit, lint, integration against real Elasticsearch and a storage emulator, plus a job that boots the compose stack and drives a request end to end |
+| [`scripts/loadtest.sh`](scripts/loadtest.sh) | One load test used for both the README's numbers and CI's regression gate |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | Unit, lint, integration against real Elasticsearch and a storage emulator, plus a job that boots the compose stack, drives a request end to end and load tests it |
 
 ## Project Structure
 
@@ -81,6 +89,8 @@ If you have five minutes and want the parts worth reviewing:
 │   ├── .env.example
 │   └── go.mod
 │
+├── scripts/
+│   └── loadtest.sh    # vegeta load test; same script locally and in CI
 ├── docker-compose.yml # the whole stack, offline
 └── README.md
 ```
@@ -316,6 +326,79 @@ no `image_generations_total` in it at all — and "nothing has been generated ye
 then reads identically to "the metric was renamed" or "that code path was never
 deployed". Both failures are silent.
 
+### Load testing
+
+`scripts/loadtest.sh` drives [vegeta](https://github.com/tsenart/vegeta) at the
+stack. One script serves two purposes: locally it produces the numbers below, and
+CI runs it against the compose stack at much lower rates as a regression gate.
+Two scripts would drift, and the number here would stop describing the thing CI
+protects.
+
+```bash
+docker compose up -d --build --wait
+./scripts/loadtest.sh                 # or: SEARCH_RATE=6000 DURATION=60s ./scripts/loadtest.sh
+```
+
+Measured on an **Apple M3, 8 cores, 16 GB**, macOS 14 — Go 1.26.5, Elasticsearch
+7.17.24 single node with a 1 GB heap, `IMAGE_PROVIDER=stub`. Load generator,
+API, Elasticsearch and the storage emulator all on the same machine over
+loopback. 30 seconds per scenario.
+
+| Scenario | What it exercises | Rate | Requests | Success | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|---|---|---|
+| `GET /healthz` | HTTP stack floor: no auth, no I/O | 3000/s | 90,000 | 100% | 0.1 ms | 0.1 ms | 0.2 ms | 13 ms |
+| `GET /search` | JWT check + revocation lookup + query | 3000/s | 90,001 | 100% | 0.3 ms | 0.8 ms | 1.9 ms | 26.5 ms |
+| `POST /signin` | bcrypt | 10/s | 300 | 100% | 60.4 ms | 61.8 ms | 63 ms | 69.8 ms |
+
+Read the third row as the design working, not as a problem: bcrypt is *supposed*
+to cost 60ms. The reason `/signin` is driven at 10/s and not 3000/s is that it is
+CPU-bound by intent, so saturating it would measure the depth of the queue rather
+than the hash.
+
+Beyond the table, `/search` sustains **6,400 req/s at p99 13 ms**, saturates
+around 8,500/s, and collapses at 12,800/s.
+
+**What load testing actually found.** The interesting result was not a number, it
+was a bug that no functional test could have caught. `olivere/elastic` falls back
+to `http.DefaultClient`, whose transport keeps **two** idle connections per host.
+Two is plenty when requests arrive one at a time, which is why every test passed
+and manual use looked fine. Under concurrency the third simultaneous query opens a
+fresh TCP connection and, on completion, finds both idle slots taken and closes it
+again — and since every authenticated request makes two Elasticsearch calls (the
+session-revocation get, then the query), the churn scales with traffic.
+
+Same machine, same 3000/s load for 15 s, the only change being an explicitly sized
+pool (`store/elasticsearch.go`):
+
+| | Default transport | Sized pool |
+|---|---|---|
+| Sockets left in `TIME_WAIT` | 9,529 | **0** |
+| Connections held open to ES | 4 | 46 |
+| p95 | 9.7 ms | **0.6 ms** |
+| p99 | 53.8 ms | **1.7 ms** |
+| max | 222.6 ms | **11.1 ms** |
+| At 6,400 req/s | 10% success, 3,670 `500`s | **100% success**, p99 13.4 ms |
+
+The 53.8ms p99 against a 0.4ms median is the shape of TCP setup, not of query
+work. The `500`s at 6,400/s were `connection reset by peer` from Elasticsearch,
+and the connection churn had eaten enough of the machine's ephemeral ports that
+the load generator started failing to `bind` as well.
+
+Where the time goes, from the service's own metrics during the run: two
+Elasticsearch round trips per authenticated request, ~0.16 ms for the revocation
+`get` and ~0.26 ms for the query, out of a ~0.47 ms request. **Roughly 90% of
+`/search` is Elasticsearch**, which is why the per-request revocation lookup —
+see [Authentication](#authentication) — is the first thing a cache would target if
+that lookup ever stopped being cheap.
+
+**What these numbers are not.** The index holds tens of documents, not millions,
+so they say nothing about how the query scales with corpus size. Everything is on
+one machine over loopback, so no real network is involved and the load generator
+competes with the service for CPU. A single Elasticsearch node with one shard and
+no replicas is not a cluster. `/generate` is not load tested at all: the quota caps
+it at 20 per user per day, so a sustained rate against it would measure the
+rejection path, and against the real provider it would spend money.
+
 ### Health probes
 
 Two endpoints, because they answer different questions and a single one cannot.
@@ -469,8 +552,15 @@ stores the result, and returns the saved post. The frontend holds no API key.
 ## Known gaps
 
 - A revoked session is enforced with one Elasticsearch get per authenticated
-  request. That is a sub-millisecond lookup at this scale; a short-lived cache
-  would trade immediate revocation for throughput if it ever stops being cheap.
+  request, measured at ~0.16 ms and about a third of the Elasticsearch time on the
+  read path. A short-lived cache would trade immediate revocation for throughput if
+  it ever stops being cheap; at the measured cost it has not earned the
+  inconsistency yet.
+- Overload is not shed gracefully. Past saturation the API returns `500`s from
+  failed Elasticsearch calls rather than refusing work early with a `503`. Bounded
+  concurrency in front of the datastore, or a circuit breaker, would turn a
+  collapse into degradation — the load test above is what makes this visible, and
+  the fix is not written yet.
 - `/signout` revokes every token for that user, not just the one presented.
   Signing out of one browser signs out of all of them.
 - Search paging is offset-based (`from`/`size`), which degrades past roughly
