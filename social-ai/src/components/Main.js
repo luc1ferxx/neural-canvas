@@ -34,11 +34,14 @@ function Main(props) {
   return (
     <div className="main">
       <Routes>
-        <Route path="/" exact element={showLogin()} />
+        {/* `exact` was a React Router v5 prop and did nothing in v6. */}
+        <Route path="/" element={showLogin()} />
         <Route path="/login" element={showLogin()} />
         <Route path="/register" element={showRegister()} />
         <Route path="/create" element={showLanding()} />
         <Route path="/collection" element={showCollection()} />
+        {/* Without a catch-all an unknown URL rendered an empty page. */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>
   );

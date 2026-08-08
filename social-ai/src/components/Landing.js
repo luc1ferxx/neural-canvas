@@ -13,8 +13,7 @@ import Paper from "@mui/material/Paper";
 import InputBase from "@mui/material/InputBase";
 import IconButton from "@mui/material/IconButton";
 import ArrowForwardIosIcon from "@mui/icons-material/ArrowForward";
-import { BASE_URL, TOKEN_KEY } from "../constants";
-import axios from "axios";
+import api from "../api";
 import { message } from "antd";
 import { CircularProgress } from "@mui/material";
 
@@ -63,15 +62,7 @@ export default function Landing() {
     try {
       setIsGeneratingImage(true);
 
-      const res = await axios({
-        method: "POST",
-        url: `${BASE_URL}/generate`,
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}`,
-          "Content-Type": "application/json",
-        },
-        data: { prompt },
-      });
+      const res = await api.post("/generate", { prompt });
 
       const post = res.data;
       setPhotos([{ src: post.url, width: 200, height: 200 }]);

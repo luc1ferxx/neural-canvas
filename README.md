@@ -148,16 +148,14 @@ Tracked but not yet addressed:
   server-side paged requires indexing that field and reindexing existing posts.
   With the default page size of 50 this is no longer visible in practice, but it
   is not correct for large collections.
-- `Collection.js` waits three seconds after a create before refetching, to let
-  Elasticsearch refresh. The fix is `Refresh("wait_for")` on the write path.
-- `CreatePostButton.js` calls `type.match(/^(image|video)/g)[0]`, which throws
-  when the picked file is neither, e.g. a PDF.
-- Logout only clears localStorage. The JWT stays valid for its full 24 hours;
-  there is no revocation list.
-- No 401 interceptor: an expired token surfaces as a generic "failed" toast
-  rather than returning the user to the login screen.
-- `Main.js` passes `exact`, a React Router v5 prop that does nothing in v6, and
-  there is no catch-all 404 route.
+- Logout and the 401 handler both clear the token client side. The JWT itself
+  stays valid for the remainder of its 24 hours, because there is no server-side
+  revocation list.
+- The sign-in throttle counts attempts in process memory, so with more than one
+  instance the effective limit is per-instance.
+- QuickTime `.mov`, `.flv` and `.wmv` uploads are rejected: Go's content sniffer
+  cannot positively identify them, and the filename extension is not trusted.
+  Supporting them needs explicit ftyp brand parsing.
 - No CI. `go build ./...`, `go vet ./...`, `go test ./...`, `npm ci` and
   `npm test` all pass locally and would make a reasonable first workflow.
 

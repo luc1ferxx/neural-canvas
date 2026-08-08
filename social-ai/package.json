@@ -57,5 +57,8 @@
     "moduleNameMapper": {
       "^yet-another-react-lightbox/plugins/(.*)$": "<rootDir>/node_modules/yet-another-react-lightbox/dist/plugins/$1/index.js"
     }
+  },
+  "devDependencies": {
+    "axios-mock-adapter": "^2.1.0"
   }
 }

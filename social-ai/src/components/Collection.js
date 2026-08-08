@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from "react";
 import { Tabs, message, Row, Col } from "antd";
-import axios from "axios";
 
 import SearchBar from "./SearchBar";
-import { SEARCH_KEY, BASE_URL, TOKEN_KEY } from "../constants";
+import { SEARCH_KEY } from "../constants";
+import api from "../api";
 import PhotoGallery from "./PhotoGallery";
 import CreatePostButton from "./CreatePostButton";
 
@@ -29,7 +29,6 @@ function Collection(props) {
 
   const fetchPosts = (option) => {
     const { type, keyword } = option;
-    let url = "";
 
     // Ask for a full page explicitly. Without a size the backend fell back to
     // Elasticsearch's default of 10 results, which made the type tabs below
@@ -44,17 +43,8 @@ function Collection(props) {
       params.set("keywords", keyword);
     }
 
-    url = `${BASE_URL}/search?${params.toString()}`;
-
-    const opt = {
-      method: "GET",
-      url: url,
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}`,
-      },
-    };
-
-    axios(opt)
+    api
+      .get(`/search?${params.toString()}`)
       .then((res) => {
         if (res.status === 200) {
           setPosts(res.data);
@@ -110,9 +100,10 @@ function Collection(props) {
 
   const showPost = (type) => {
     setActiveTab(type);
-    setTimeout(() => {
-      setSearchOption({ type: SEARCH_KEY.all, keyword: "" });
-    }, 3000);
+    // Refetch immediately. This used to wait three seconds for Elasticsearch to
+    // refresh; the write path now uses refresh=wait_for, so the new post is
+    // searchable by the time the upload response arrives.
+    setSearchOption({ type: SEARCH_KEY.all, keyword: "" });
   };
 
   const operations = <CreatePostButton onShowPost={showPost} />;

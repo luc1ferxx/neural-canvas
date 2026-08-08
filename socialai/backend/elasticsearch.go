@@ -121,10 +121,14 @@ func (backend *ElasticsearchBackend) ReadFromESPaged(query elastic.Query, index 
 // DeleteFromES removes every document matching query and reports how many were
 // deleted, so a caller can tell "nothing matched" from "deleted successfully"
 // instead of reporting success for a no-op.
+//
+// Refresh("true") makes the deletion visible to the next search. Unlike the
+// single-document delete API, _delete_by_query does not accept "wait_for".
 func (backend *ElasticsearchBackend) DeleteFromES(query elastic.Query, index string) (int64, error) {
 	resp, err := backend.client.DeleteByQuery().
 		Index(index).
 		Query(query).
+		Refresh("true").
 		Pretty(true).
 		Do(context.Background())
 	if err != nil {
@@ -137,11 +141,23 @@ func (backend *ElasticsearchBackend) DeleteFromES(query elastic.Query, index str
 	return resp.Deleted, nil
 }
 
+// SaveToES indexes a document and waits for it to become searchable.
+//
+// Refresh("wait_for") is what lets a caller read its own write. Elasticsearch
+// refreshes about once a second by default, so without this a newly created post
+// is invisible to the search that immediately follows it -- which the frontend
+// used to paper over with a three-second sleep -- and a fresh signup could fail
+// the login that follows it.
+//
+// The cost is up to one refresh interval of latency on the write. That is
+// preferable to a fixed client-side delay that is simultaneously too slow in the
+// common case and still a race in the worst one.
 func (backend *ElasticsearchBackend) SaveToES(i interface{}, index string, id string) error {
 	_, err := backend.client.Index().
 		Index(index).
 		Id(id).
 		BodyJson(i).
+		Refresh("wait_for").
 		Do(context.Background())
 	return err
 }

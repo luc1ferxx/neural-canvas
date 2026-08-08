@@ -2,8 +2,7 @@ import React, { useState, useEffect } from "react";
 import PropTypes from "prop-types";
 import { Button, message } from "antd";
 import { DeleteOutlined } from "@ant-design/icons";
-import axios from "axios";
-import { BASE_URL, TOKEN_KEY } from "../constants";
+import api from "../api";
 import PhotoAlbum from "react-photo-album";
 import Lightbox from "yet-another-react-lightbox";
 import Fullscreen from "yet-another-react-lightbox/plugins/fullscreen";
@@ -66,15 +65,8 @@ function PhotoGallery(props) {
     }
     if (window.confirm(`Are you sure you want to delete this image?`)) {
       const newImageArr = images.filter((img) => img.postId !== postId);
-      const opt = {
-        method: "DELETE",
-        url: `${BASE_URL}/post/${encodeURIComponent(postId)}`,
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}`,
-        },
-      };
-
-      axios(opt)
+      api
+        .delete(`/post/${encodeURIComponent(postId)}`)
         .then((res) => {
           if (res.status === 200) {
             setImages(newImageArr);

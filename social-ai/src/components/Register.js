@@ -1,9 +1,8 @@
 import React from "react";
 import { useNavigate } from "react-router-dom";
 import { Form, Input, Button, message } from "antd";
-import axios from "axios";
 
-import { BASE_URL } from "../constants";
+import api from "../api";
 
 // (mobile) responsiveness design
 const formItemLayout = {
@@ -35,22 +34,11 @@ function Register(props) {
   const navigate = useNavigate();
 
   const onFinish = (values) => {
-    console.log("Received values of form: ", values);
     const { username, password } = values;
-    const opt = {
-      method: "POST",
-      url: `${BASE_URL}/signup`,
-      data: {
-        username: username,
-        password: password,
-      },
-      headers: { "content-type": "application/json" },
-    };
 
-    axios(opt)
+    api
+      .post("/signup", { username, password })
       .then((response) => {
-        console.log(response);
-        // case1: registered success
         if (response.status === 200) {
           message.success("Registration succeeded!");
           navigate("/login");
@@ -58,8 +46,14 @@ function Register(props) {
       })
       .catch((error) => {
         console.log("register failed: ", error.message);
-        message.error("Registration failed!");
-        // throw new Error('Signup Failed!')
+        // The backend validates the username format, the password length and
+        // whether the name is taken, and explains which one failed. Showing
+        // only "Registration failed!" hid all of that from the user.
+        const detail =
+          error.response && typeof error.response.data === "string"
+            ? error.response.data.trim()
+            : "";
+        message.error(detail || "Registration failed!");
       });
   };
 
