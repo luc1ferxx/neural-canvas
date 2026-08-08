@@ -101,12 +101,14 @@ export default function Landing() {
       <HeaderContainer>
         <Typography
           variant="h1"
-          frontSize="5.25rem"
           marginTop="128px"
           noWrap
           component="div"
           sx={{
             fontFamily: "Roboto",
+            // Was frontSize="5.25rem": a typo, so the size never applied and
+            // React rejected it as an unknown DOM attribute.
+            fontSize: "5.25rem",
             color: "white",
             textDecoration: "none",
           }}
@@ -115,11 +117,11 @@ export default function Landing() {
         </Typography>
         <Typography
           variant="h5"
-          frontSize="1.2rem"
           component="div"
           sx={{
             mr: 2,
             fontFamily: "Roboto",
+            fontSize: "1.2rem",
             color: "white",
             textDecoration: "none",
             margin: " 0 20px",

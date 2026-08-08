@@ -48,5 +48,14 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "jest": {
+    "transformIgnorePatterns": [
+      "node_modules/(?!(yet-another-react-lightbox)/)",
+      "^.+\\.module\\.(css|sass|scss)$"
+    ],
+    "moduleNameMapper": {
+      "^yet-another-react-lightbox/plugins/(.*)$": "<rootDir>/node_modules/yet-another-react-lightbox/dist/plugins/$1/index.js"
+    }
   }
 }

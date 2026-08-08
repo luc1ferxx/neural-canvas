@@ -75,3 +75,21 @@ func (backend *GoogleCloudStorageBackend) SaveToGCS(r io.Reader, objectName, con
 	fmt.Printf("File is saved to GCS: %s\n", attrs.MediaLink)
 	return attrs.MediaLink, nil
 }
+
+// DeleteFromGCS removes an object. A missing object is not an error: the caller
+// is deleting a post, and an already-absent file means that goal is met.
+//
+// This matters for the delete flow: every object is world-readable, so leaving
+// the file behind would keep a "deleted" image publicly fetchable by its URL.
+func (backend *GoogleCloudStorageBackend) DeleteFromGCS(objectName string) error {
+	ctx := context.Background()
+
+	err := backend.client.Bucket(backend.bucket).Object(objectName).Delete(ctx)
+	if err == storage.ErrObjectNotExist {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("delete object %q: %w", objectName, err)
+	}
+	return nil
+}

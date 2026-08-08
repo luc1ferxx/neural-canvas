@@ -10,6 +10,7 @@ import (
 	"socialai/model"
 	"socialai/service"
 
+	"github.com/gorilla/mux"
 	"github.com/pborman/uuid"
 )
 
@@ -73,13 +74,14 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 
 	user := r.URL.Query().Get("user")
 	keywords := r.URL.Query().Get("keywords")
+	from, size := parsePagination(r.URL.Query())
 
 	var posts []model.Post
 	var err error
 	if user != "" {
-		posts, err = service.SearchPostsByUser(user)
+		posts, err = service.SearchPostsByUser(user, from, size)
 	} else {
-		posts, err = service.SearchPostsByKeywords(keywords)
+		posts, err = service.SearchPostsByKeywords(keywords, from, size)
 	}
 	if err != nil {
 		http.Error(w, "Failed to read post from backend", http.StatusInternalServerError)
@@ -99,4 +101,39 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(js)
+}
+
+// deleteHandler removes one of the caller's own posts.
+//
+// The route for this existed only as a commented-out line, so the frontend's
+// delete button called an endpoint that always 404'd.
+func deleteHandler(w http.ResponseWriter, r *http.Request) {
+	fmt.Println("Received one delete request")
+
+	username, ok := usernameFromContext(r)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		http.Error(w, "Post id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Ownership is enforced in the service by matching id AND user, so one user
+	// cannot delete another's post.
+	if err := service.DeletePost(id, username); err != nil {
+		if errors.Is(err, service.ErrPostNotFound) {
+			http.Error(w, "Post not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "Failed to delete post", http.StatusInternalServerError)
+		fmt.Printf("Failed to delete post %v\n", err)
+		return
+	}
+
+	fmt.Printf("Post %s deleted by %s\n", id, username)
+	writeJSON(w, http.StatusOK, map[string]string{"id": id})
 }

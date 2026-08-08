@@ -61,12 +61,14 @@ function PhotoGallery(props) {
   });
 
   const onDeleteImage = (postId) => {
+    if (!postId) {
+      return;
+    }
     if (window.confirm(`Are you sure you want to delete this image?`)) {
       const newImageArr = images.filter((img) => img.postId !== postId);
-      console.log("delete image ", newImageArr);
       const opt = {
         method: "DELETE",
-        url: `${BASE_URL}/post/${postId}`,
+        url: `${BASE_URL}/post/${encodeURIComponent(postId)}`,
         headers: {
           Authorization: `Bearer ${localStorage.getItem(TOKEN_KEY)}`,
         },
@@ -74,15 +76,14 @@ function PhotoGallery(props) {
 
       axios(opt)
         .then((res) => {
-          console.log("delete result -> ", res);
-          // case1: success
           if (res.status === 200) {
-            // step1: set state
             setImages(newImageArr);
+            // Close the lightbox: the slide it was showing no longer exists.
+            setIndex(-1);
+            message.success("Image deleted!");
           }
         })
         .catch((err) => {
-          // case2: fail
           message.error("Delete posts failed!");
           console.log("Delete posts failed: ", err.message);
         });
@@ -122,7 +123,9 @@ function PhotoGallery(props) {
               sx={{ p: "10px" }}
               aria-label="delete the image"
               onClick={() => {
-                onDeleteImage(imageArr[index].postId);
+                // Guard the index: it survives a close and can point past the
+                // end of the array after a deletion.
+                onDeleteImage(imageArr[index]?.postId);
               }}
             >
               <DeleteIcon sx={{ color: "#CCCCCC" }} />

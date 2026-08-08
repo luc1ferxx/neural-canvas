@@ -73,6 +73,18 @@ go test ./...             # tests
 | `POST` | `/generate` | JWT | Generate an image from a prompt, store it, return the post |
 | `POST` | `/upload` | JWT | Upload media and create a post |
 | `GET` | `/search` | JWT | Search posts by `user` or `keywords` |
+| `DELETE` | `/post/{id}` | JWT | Delete one of your own posts and its stored media |
+
+`GET /search` accepts `from` and `size` for paging, defaulting to `from=0` and
+`size=50` with a ceiling of 200. Invalid values are clamped rather than
+rejected. Leaving `size` unset previously fell through to Elasticsearch's
+default of 10, which silently truncated every result set.
+
+`DELETE /post/{id}` only removes a post whose `user` matches the caller, and
+returns 404 when nothing matches — a missing post and someone else's post are
+indistinguishable, so the API does not confirm that another user's post id
+exists. The media object is deleted before the index entry, because bucket
+objects are world-readable and a leftover file would stay fetchable by URL.
 
 ### Authentication
 
@@ -131,15 +143,23 @@ stores the result, and returns the saved post. The frontend holds no API key.
 
 Tracked but not yet addressed:
 
-- `GET /search` returns at most 10 results — `ReadFromES` sets no page size, so
-  it takes the Elasticsearch default. The frontend then filters by type client
-  side, so a tab can read "No images!" while images exist.
-- `DELETE /post/{id}` is not routed. The frontend calls it and the handler is
-  written, but the route is commented out, so deletion always fails.
-- `social-ai/src/App.test.js` imports `./App`, but the component lives in
-  `./components/App` — the only frontend test does not run.
-- Search keywords are not URL-encoded, so terms containing `&` or `#` search
-  for the wrong thing.
+- Type tabs filter client side within one page. The `type` field is mapped
+  `"index": false`, so Elasticsearch cannot filter on it; making the tabs
+  server-side paged requires indexing that field and reindexing existing posts.
+  With the default page size of 50 this is no longer visible in practice, but it
+  is not correct for large collections.
+- `Collection.js` waits three seconds after a create before refetching, to let
+  Elasticsearch refresh. The fix is `Refresh("wait_for")` on the write path.
+- `CreatePostButton.js` calls `type.match(/^(image|video)/g)[0]`, which throws
+  when the picked file is neither, e.g. a PDF.
+- Logout only clears localStorage. The JWT stays valid for its full 24 hours;
+  there is no revocation list.
+- No 401 interceptor: an expired token surfaces as a generic "failed" toast
+  rather than returning the user to the login screen.
+- `Main.js` passes `exact`, a React Router v5 prop that does nothing in v6, and
+  there is no catch-all 404 route.
+- No CI. `go build ./...`, `go vet ./...`, `go test ./...`, `npm ci` and
+  `npm test` all pass locally and would make a reasonable first workflow.
 
 ## License
 

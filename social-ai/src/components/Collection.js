@@ -9,6 +9,10 @@ import CreatePostButton from "./CreatePostButton";
 
 const { TabPane } = Tabs;
 
+// Matches the backend's default page size. The type tabs filter this set client
+// side, so the page has to be large enough to contain both kinds of post.
+const PAGE_SIZE = 50;
+
 function Collection(props) {
   const [posts, setPosts] = useState([]);
   const [activeTab, setActiveTab] = useState("image");
@@ -27,13 +31,20 @@ function Collection(props) {
     const { type, keyword } = option;
     let url = "";
 
-    if (type === SEARCH_KEY.all) {
-      url = `${BASE_URL}/search`;
-    } else if (type === SEARCH_KEY.user) {
-      url = `${BASE_URL}/search?user=${keyword}`;
-    } else {
-      url = `${BASE_URL}/search?keywords=${keyword}`;
+    // Ask for a full page explicitly. Without a size the backend fell back to
+    // Elasticsearch's default of 10 results, which made the type tabs below
+    // report "No images!" whenever the first 10 posts happened to be videos.
+    const params = new URLSearchParams({ size: String(PAGE_SIZE) });
+
+    if (type === SEARCH_KEY.user) {
+      // URLSearchParams encodes the value, so keywords containing & or # no
+      // longer truncate the query.
+      params.set("user", keyword);
+    } else if (type !== SEARCH_KEY.all) {
+      params.set("keywords", keyword);
     }
+
+    url = `${BASE_URL}/search?${params.toString()}`;
 
     const opt = {
       method: "GET",

@@ -84,6 +84,10 @@ func ensureIndex(client *elastic.Client, index, mapping string) error {
 	return nil
 }
 
+// ReadFromES runs query and returns at most Elasticsearch's default of 10 hits.
+// Use it only for lookups that expect a single document, such as resolving a
+// username or checking ownership of one post. For anything list-shaped use
+// ReadFromESPaged: the default was silently capping search results at 10.
 func (backend *ElasticsearchBackend) ReadFromES(query elastic.Query, index string) (*elastic.SearchResult, error) {
 	searchResult, err := backend.client.Search().
 		Index(index).
@@ -97,14 +101,40 @@ func (backend *ElasticsearchBackend) ReadFromES(query elastic.Query, index strin
 	return searchResult, nil
 }
 
-func (backend *ElasticsearchBackend) DeleteFromES(query elastic.Query, index string) error {
-	_, err := backend.client.DeleteByQuery().
+// ReadFromESPaged runs query with an explicit window. Callers must pass a size;
+// leaving it unset is what limited every search to 10 results.
+func (backend *ElasticsearchBackend) ReadFromESPaged(query elastic.Query, index string, from, size int) (*elastic.SearchResult, error) {
+	searchResult, err := backend.client.Search().
+		Index(index).
+		Query(query).
+		From(from).
+		Size(size).
+		Pretty(true).
+		Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	return searchResult, nil
+}
+
+// DeleteFromES removes every document matching query and reports how many were
+// deleted, so a caller can tell "nothing matched" from "deleted successfully"
+// instead of reporting success for a no-op.
+func (backend *ElasticsearchBackend) DeleteFromES(query elastic.Query, index string) (int64, error) {
+	resp, err := backend.client.DeleteByQuery().
 		Index(index).
 		Query(query).
 		Pretty(true).
 		Do(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	if resp == nil {
+		return 0, nil
+	}
 
-	return err
+	return resp.Deleted, nil
 }
 
 func (backend *ElasticsearchBackend) SaveToES(i interface{}, index string, id string) error {
